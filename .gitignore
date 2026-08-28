@@ -1,0 +1,15 @@
+# Competition data (download from Zindi into data/)
+data/
+
+# Environment
+.venv/
+__pycache__/
+*.pyc
+
+# Generated artifacts -- regenerate with `python model.py`
+submission.csv
+valid_preds.parquet
+
+# Ablation caches (large, regenerable)
+cache_*.parquet
+cache_*.npz
