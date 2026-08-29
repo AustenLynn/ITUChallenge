@@ -79,6 +79,22 @@ Recorded so they are not re-proposed. Each looked principled and lost:
     # download Train.csv, Test.csv, SampleSubmission.csv into data/
     .venv/bin/python model.py     # writes submission.csv
 
+## Leaderboard calibration
+
+| version | test-weighted validation | public leaderboard | commit |
+|---|---|---|---|
+| v2 (anchor deltas + neighbours) | 0.6992 | 0.774957 | pre-repo |
+| v4 (recency weighting + drift)  | 0.6812 | 0.767074 | 6a20efd |
+
+Benchmark 0.899886; 476 active participants. The public leaderboard scores only
+a portion of the test set, so the final standing will move.
+
+**Roughly 44% of validation gains transfer** (-0.0180 offline bought -0.0079 on
+the board). Discount offline improvements by ~2.3x when predicting leaderboard
+movement. The absolute gap also widened slightly (0.076 -> 0.086), so some of
+the recency gain is specific to a validation window that sits immediately after
+the training data, where the real test period runs up to 40 months out.
+
 ## Caveats
 
 - `nb_last_tws` dominates gain-based importance while `last_tws` sits third.
