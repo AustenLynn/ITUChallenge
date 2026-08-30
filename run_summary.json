@@ -1,7 +1,7 @@
 {
   "selected": "blend",
-  "rmse_global": 0.6834144645214295,
-  "rmse_per_horizon": 0.683165920972608,
-  "rmse_blend": 0.6811965625201146,
-  "emissions_kg_co2eq": 0.001997343842411551
+  "rmse_global": 0.6278018357502457,
+  "rmse_per_horizon": 0.6269706969662805,
+  "rmse_blend": 0.625187803149346,
+  "emissions_kg_co2eq": 0.0016898799265112098
 }

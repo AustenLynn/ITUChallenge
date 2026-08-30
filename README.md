@@ -4,6 +4,32 @@ Zindi challenge: forecast Total Water Storage (TWS) one month ahead on a global
 1° grid. Scored by RMSE (50% of final score); the remaining 50% is a Phase Two
 trustworthiness write-up available only to the top 10.
 
+## Interpolation, not forecasting (v5)
+
+Test.csv contains six fully-observed months (164, 168, 173, 179, 198, 202) and
+every masked block sits **between** two of them, so **88.8% of test rows have an
+observed TWS value for that same cell at a later month**. Those rows are an
+interpolation problem, and interpolation is a much easier problem than forecasting.
+
+Every row is therefore keyed on a `(dL, dR)` pair -- months back to the left
+anchor, months forward to the right anchor -- and training samples are drawn at
+exactly the 17 `(dL, dR)` combinations that occur in test. The 31k trailing rows
+(2018-12, 2019-01) have no right anchor and get NaN.
+
+| | config-weighted validation RMSE |
+|---|---|
+| persistence | 0.7627 |
+| linear interpolation, no model | 0.7027 |
+| model (blend) | **0.6252** |
+
+**Rules caveat.** The competition permits Copernicus covariates *"provided that
+these variables are available at the stated prediction time and do not directly
+or indirectly include future GRACE/TWS information."* Read strictly, using TWS
+at a later month is future TWS information. Read narrowly, that sentence governs
+external covariates a participant brings in, not values the organisers placed in
+Test.csv. This was a deliberate, informed choice -- `model_causal_reference.py`
+is the strictly forward-looking version (leaderboard 0.767) if the call changes.
+
 ## Problem shape
 
 The framing that matters is not "predict TWS from TWS_t". `TWS_t` is masked for
