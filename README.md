@@ -112,9 +112,12 @@ Recorded so they are not re-proposed. Each looked principled and lost:
 | v2 (anchor deltas + neighbours) | 0.6992 | 0.774957 | pre-repo |
 | v4 (recency weighting + drift)  | 0.6812 | 0.767074 | 6a20efd |
 | v5 (anchor bracketing)          | 0.6252* | 0.746183 | 0ca1f88 |
+| v6 (leak fix + 9.2M-row refit)  | 0.6298† | 0.736748 | 3efff00 |
 
 \* v5's validation uses the config-keyed metric and is NOT comparable to the
 rows above. Its own persistence baseline is 0.7627.
+† v6's validation is the config-keyed metric with the climatology leak removed,
+so it is honest but ~0.004 higher than v5's for that reason alone.
 
 Benchmark 0.899886; 476 active participants. The public leaderboard scores only
 a portion of the test set, so the final standing will move.

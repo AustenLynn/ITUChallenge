@@ -13,17 +13,27 @@ Phase Two trustworthiness write-up that **only the top 10 may submit**.
 | competition benchmark | 0.899886 |
 | v2 | 0.774957 |
 | v4 (recency + drift) | 0.767074 |
-| **v5 (anchor bracketing) — current** | **0.746183** |
-| v6 (leak fix, larger refit) — not yet submitted | ? |
+| v5 (anchor bracketing) | 0.746183 |
+| **v6 (leak fix + larger refit) — current** | **0.736748** |
 | leader (rank 1) | 0.559588 |
 
-**Rank 179 of 476 active. The top-10 cutoff is 0.655935.**
+**Rank 179 of 476 active at 0.746; unknown at 0.736. The top-10 cutoff is
+0.655935.**
 
-The gap to top 10 is 0.090. Note what that means: **offline validation is
+The gap to top 10 is **0.081**. Note what that means: **offline validation is
 already 0.630, better than the 0.656 the cutoff requires.** The entire gap is
-transfer, not signal. That reframes the whole problem — the task is not to find
-more predictive power, it is to work out why offline improvements arrive at the
-board at a fraction of their size.
+transfer, not signal. The task is not to find more predictive power, it is to
+work out why offline improvements arrive at the board at a fraction of their
+size — or to find changes that transfer at closer to 1:1.
+
+The offline-to-board gap by version:
+
+| version | offline | board | gap |
+|---|---|---|---|
+| v5 | 0.6252 (leaky metric) | 0.746183 | 0.121 |
+| v6 | 0.6298 (honest metric) | 0.736748 | 0.107 |
+
+To reach 0.656 at the current gap, offline needs to hit roughly **0.55**.
 
 ## Start here: the transfer problem
 
@@ -104,6 +114,7 @@ Two hypotheses worth separating:
 | per-cell drift features | −0.004 |
 | anchor bracketing / interpolation (v5) | large offline, −0.021 board |
 | climatology leak fix (v6) | +0.004 offline (honesty, not score) |
+| **larger final refit** (4.6M → 9.2M rows) | **−0.009 board** |
 
 ## What was measured and REJECTED — do not re-propose
 
@@ -123,9 +134,20 @@ Each looked principled and lost. Numbers are config- or test-weighted RMSE.
 
 ## Ranked next steps
 
-0. **Submit the current `submission.csv`.** Built after the climatology fix and
-   on a larger final refit (9.2M rows vs 4.6M). Unscored as of handoff.
-1. **The transfer diagnostic above.** Everything else is guesswork until offline
+1. **Scale the final refit further — the cheapest lever, and the only change so
+   far that transferred well.** v6 bundled two changes: the climatology leak fix
+   (which only affects model *selection*, since validation features are not used
+   to build the submission) and doubling the final refit from 4.6M to 9.2M rows
+   (which does change the submission). The board moved −0.009, and the leak fix
+   can only have touched it indirectly through `best_iteration`, so the data
+   volume is the likely cause. Not cleanly separated — the two changes went out
+   together — but it is the most plausible reading and it is trivially testable.
+
+   Contrast this with feature engineering, which has transferred at well under
+   1:1 all session. `N_PER_CFG` is currently 300k (600k for the final refit).
+   **There is now ~2.2 GB of headroom** after clearing the stale ablation caches,
+   where the earlier run finished with 68 MB. Raise it and measure.
+2. **The transfer diagnostic above.** Everything else is guesswork until offline
    movement can be trusted. Be aware the answer may be "the gap is real and
    irreducible", which would mean top 10 needs a discovery, not refinement.
 2. **External Copernicus covariates — the biggest untouched legitimate lever.**
