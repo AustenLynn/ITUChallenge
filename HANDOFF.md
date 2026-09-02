@@ -14,11 +14,16 @@ Phase Two trustworthiness write-up that **only the top 10 may submit**.
 | v2 | 0.774957 |
 | v4 (recency + drift) | 0.767074 |
 | **v5 (anchor bracketing) — current** | **0.746183** |
+| v6 (leak fix, larger refit) — not yet submitted | ? |
 | leader (rank 1) | 0.559588 |
 
-Rank was 259 of 476 active at 0.775; the rank at 0.746 is unknown — **ask the
-user for it**, and for the rank-10 score, since that determines whether Phase
-Two is even reachable.
+**Rank 179 of 476 active. The top-10 cutoff is 0.655935.**
+
+The gap to top 10 is 0.090. Note what that means: **offline validation is
+already 0.630, better than the 0.656 the cutoff requires.** The entire gap is
+transfer, not signal. That reframes the whole problem — the task is not to find
+more predictive power, it is to work out why offline improvements arrive at the
+board at a fraction of their size.
 
 ## Start here: the transfer problem
 
@@ -33,13 +38,29 @@ because its persistence baseline (0.7627) sat near v4's board score (0.767).
 **That reasoning was wrong** — comparing a persistence *baseline* against a
 *model's* board score is not a calibration, and the v5 result contradicts it.
 
-**First task, before any new modelling:** score the v4 causal feature set on the
-v5 config-keyed validation. That yields the first clean offline delta for v5 and
-a real transfer ratio. `model_causal_reference.py` holds the v4 features;
-`model.py` holds the config-keyed harness; `ablate.py` shows the pattern for
-running two feature sets against one fixed validation set.
+**One cause has been found and fixed** (`diag4.py`, commit below). `climatology()`
+aggregates targets, so computing it over all train rows placed a validation
+row's own target inside its own `clim_m` / `cell_mean` / `cell_std`, while a
+test row's came from train only. Validation was being scored with a
+better-informed feature than test receives. Removing it costs **0.004**
+(0.6270 → 0.6311) — real, worth having, but only ~4% of the ~0.12 gap.
+`model.py` now uses pre-validation statistics for model selection and
+full-history statistics for the final refit, which is the correct protocol.
 
-Two hypotheses worth separating while you're in there:
+**Still open, and it is the whole ballgame:** the remaining ~0.11. The most
+likely reading is that it is genuine period difficulty — 2015–2019 (record
+2015–16 El Niño, up to 40 months past training) is simply harder than
+2013–2015 — in which case it is a floor rather than a bug, and reaching 0.656
+requires offline ~0.54. That is another improvement the size of the entire
+bracketing discovery.
+
+**Next diagnostic:** score the v4 causal feature set on the config-keyed
+validation. Nobody has done it, so v5's true offline delta is still unknown and
+there is no honest transfer ratio to reason with. `model_causal_reference.py`
+holds the v4 features; `ablate.py` shows the pattern for running two feature
+sets against one fixed validation set.
+
+Two hypotheses worth separating:
 
 1. **Public-subset effect.** The public board scores "only a portion of the
    total test set". If that portion is drawn by month rather than at random, the
@@ -81,7 +102,8 @@ Two hypotheses worth separating while you're in there:
 | spatial neighbour smoothing | −0.0009 |
 | exponential recency weighting (half-life 15 mo) | −0.017 |
 | per-cell drift features | −0.004 |
-| anchor bracketing / interpolation (v5) | large offline, +0.021 board |
+| anchor bracketing / interpolation (v5) | large offline, −0.021 board |
+| climatology leak fix (v6) | +0.004 offline (honesty, not score) |
 
 ## What was measured and REJECTED — do not re-propose
 
@@ -101,8 +123,11 @@ Each looked principled and lost. Numbers are config- or test-weighted RMSE.
 
 ## Ranked next steps
 
+0. **Submit the current `submission.csv`.** Built after the climatology fix and
+   on a larger final refit (9.2M rows vs 4.6M). Unscored as of handoff.
 1. **The transfer diagnostic above.** Everything else is guesswork until offline
-   movement can be trusted.
+   movement can be trusted. Be aware the answer may be "the gap is real and
+   irreducible", which would mean top 10 needs a discovery, not refinement.
 2. **External Copernicus covariates — the biggest untouched legitimate lever.**
    The rules *explicitly permit* data from the Climate Data Store and the
    European/Global Drought Observatories. We have only ever used the five

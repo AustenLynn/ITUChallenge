@@ -312,10 +312,22 @@ def main():
 
     G = build_panel(tr, te, cells)
     C = build_covariates(tr, te, len(cells), G.shape[1])
-    clim, cell_mean, cell_std = climatology(tr, cells)
-    NB, NBA = neighbour_panels(cells, G, clim)
     DM, DS, DN = drift_panels(G)
-    P = (G, clim, cell_mean, cell_std, C, NB, NBA, DM, DS, DN)
+    val_start = tr.m.max() - VALID_MONTHS + 1
+
+    def panels(src):
+        clim, cmean, cstd = climatology(src, cells)
+        NB, NBA = neighbour_panels(cells, G, clim)
+        return (G, clim, cmean, cstd, C, NB, NBA, DM, DS, DN)
+
+    # Climatology aggregates targets, so computing it over ALL train rows puts a
+    # validation row's own target inside its clim_m / cell_mean / cell_std --
+    # while a test row's come from train only. Scoring against that overstates
+    # the model by ~0.004. The selection phase therefore uses statistics from
+    # before the validation window (the honest analogue of what test gets); the
+    # final refit uses all of train, which is correct because test lies beyond it.
+    P = panels(tr[tr.m < val_start])
+    P_full = panels(tr)
 
     # --- anchors for every test row: months back to the last observed TWS,
     #     and months forward to the next one (0 == no right anchor) ---
@@ -346,7 +358,6 @@ def main():
     W = {i: cfg_counts[c] for i, c in enumerate(MAJOR)}
 
     # --- training / validation drawn at exactly those (dL, dR) combinations ---
-    val_start = tr.m.max() - VALID_MONTHS + 1
     TRX, TRY, TRM = [], [], []
     VAX, VAY, VAC, VAH, VABASE, VAM = [], [], [], [], [], []
     for ci_cfg, (dl, dr) in enumerate(MAJOR):
@@ -427,13 +438,29 @@ def main():
 
     pd.DataFrame({"h": VAH, "cfg": VAC, "target": VAY, "pred_global": g_pred,
                   "pred_horizon": h_pred, "interp": ip,
-                  "lat": VAX.lat, "lon": VAX.lon}).to_parquet("valid_preds.parquet")
+                  "lat": VAX.lat.to_numpy(), "lon": VAX.lon.to_numpy()}
+                 ).to_parquet("valid_preds.parquet")
 
     # --- refit on train+valid, predict test ---
-    ALLX = pd.concat([TRX, VAX], ignore_index=True)
-    ALLY = np.concatenate([TRY, VAY])
-    ALLM = np.concatenate([TRM, VAM])
+    # Rebuilt with full-history climatology (P_full): test lies beyond all of
+    # train, so using every train month here is the correct analogue.
+    val_keep = VAX[["lat", "lon"]].copy()
+    del TRX, VAX
+    FX, FY, FM = [], [], []
+    for (dl, dr) in MAJOR:
+        ok = tr[(tr.m + 1 - dl >= tr.m.min()) & (tr.m + 1 + dr <= tr.m.max() + 1)]
+        if len(ok) > N_PER_CFG * 2:
+            ok = ok.iloc[rng.choice(len(ok), N_PER_CFG * 2, replace=False)]
+        X, b, _ = make_features(ok, dl, dr or None, *P_full)
+        g = np.isfinite(b)
+        if dr:
+            g &= np.isfinite(X["right_tws"].to_numpy())
+        FX.append(X[g]); FY.append(ok.target.to_numpy()[g]); FM.append(ok.m.to_numpy()[g])
+    ALLX = pd.concat(FX, ignore_index=True)
+    ALLY, ALLM = np.concatenate(FY), np.concatenate(FM)
     ALLW = recency_weights(ALLM)
+    del FX, FY
+    print(f"final refit on {ALLX.shape}")
     if best in ("global", "blend"):
         fin_g = lgb.train(PARAMS, lgb.Dataset(ALLX[FEATS], ALLY, weight=ALLW),
                           num_boost_round=g_model.best_iteration)
@@ -443,13 +470,14 @@ def main():
                                                   weight=ALLW[(ALLX.h == h).to_numpy()]),
                               num_boost_round=h_models[h].best_iteration)
                  for h in h_models}
+    del ALLX
 
     pred = np.empty(len(te))
     for (dl, dr) in sorted(cfg_counts):
         k = (te_dL == dl) & (te_dR == dr)
         if not k.any():
             continue
-        X, _, _ = make_features(te[k], dl, dr or None, *P)
+        X, _, _ = make_features(te[k], dl, dr or None, *P_full)
         X = X[FEATS]
         mh = h_models.get(dl, h_models[min(h_models, key=lambda z: abs(z - dl))])
         if best == "global":
