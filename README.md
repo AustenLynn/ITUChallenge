@@ -111,11 +111,21 @@ Recorded so they are not re-proposed. Each looked principled and lost:
 |---|---|---|---|
 | v2 (anchor deltas + neighbours) | 0.6992 | 0.774957 | pre-repo |
 | v4 (recency weighting + drift)  | 0.6812 | 0.767074 | 6a20efd |
+| v5 (anchor bracketing)          | 0.6252* | 0.746183 | 0ca1f88 |
+
+\* v5's validation uses the config-keyed metric and is NOT comparable to the
+rows above. Its own persistence baseline is 0.7627.
 
 Benchmark 0.899886; 476 active participants. The public leaderboard scores only
 a portion of the test set, so the final standing will move.
 
-**Roughly 44% of validation gains transfer** (-0.0180 offline bought -0.0079 on
+**Offline gains transfer at well under 1:1, and the ratio is not yet pinned
+down.** v5 moved validation from 0.7627 (persistence) to 0.6252 but the board
+only from 0.767 to 0.746. The v4 model has never been scored on the config-keyed
+metric, so the true offline delta for v5 is unknown -- resolving that is the
+first open task (see HANDOFF.md).
+
+Earlier, on the v2->v4 pair, **roughly 44% of validation gains transferred** (-0.0180 offline bought -0.0079 on
 the board). Discount offline improvements by ~2.3x when predicting leaderboard
 movement. The absolute gap also widened slightly (0.076 -> 0.086), so some of
 the recency gain is specific to a validation window that sits immediately after
