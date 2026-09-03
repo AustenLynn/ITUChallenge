@@ -136,9 +136,9 @@ per config (5k vs 100k: identical — the field is spatially smooth enough that
 | v5 (anchor bracketing)          | 0.6252 (24-mo, leaky) | 0.746183 | 0ca1f88 |
 | v6 (leak fix + 9.2M-row refit)  | 0.6298 (24-mo) / 0.5938 replay | 0.736748 | 3efff00 |
 | v7 (transferable features, replay selection) | 0.5401 replay / 0.7111 late check | **0.738568** | this commit |
-| `submission_interp.csv` (linear interpolation) | 0.7848 late check / 0.7249 fold 123 | *not yet submitted* | |
-| `submission_hybrid_long.csv` (v7 where dR ≥ 12 or dR = 0, interp elsewhere) | | *not yet submitted* | |
-| `submission_seasonal.csv` (climatology-anchored interpolation) | worse than linear offline | *optional control* | |
+| `submission_interp.csv` (linear interpolation) | 0.7848 late check / 0.7249 fold 123 | 0.802237 | 872df0d |
+| `submission_hybrid_long.csv` (v7 where dR ≥ 12 or dR = 0, interp elsewhere) | | 0.753301 | 872df0d |
+| `submission_seasonal.csv` (climatology-anchored interpolation) | worse than linear offline | *not submitted* | |
 
 Benchmark 0.899886; 546 active participants; public leaderboard is ~30% of
 the test rows, 5 submissions per day. Top-10 cutoff 0.655935, leader 0.559588
@@ -149,8 +149,10 @@ the test rows, 5 submissions per day. Top-10 cutoff 0.655935, leader 0.559588
 - `last_tws`, `nb_last_tws`, `interp`, `interp_nb` dominate gain-based
   importance and are near-duplicates; do not read the table as a skill
   ranking — use SHAP.
-- The board has never been calibrated against interpolation. Every offline
-  check puts v7 7–18% below interpolation; if the board's interpolation score
-  is ~0.80 the gains transfer and v7 ≈ v6 is the whole story, if it is ~0.75
-  something in the public subset is still unexplained. Submit
-  `submission_interp.csv` first.
+- **Board calibration (2026-09-03).** Interpolation scores 0.802237 on the
+  public board, v7 0.738568 (ratio 0.921, between fold 123's 0.934 and the
+  late check's 0.906). In MSE, v7 removes 0.098 from interpolation's 0.644:
+  0.076 of it on the long block + extrapolation rows (the hybrid at 0.753301
+  isolates them) and 0.022 on the short bracketed configs, i.e. a 3–4% gain
+  on short spans — what the non-junk 2015 months of the late check showed.
+  The late-regime checks are calibrated; the pooled replay is not.

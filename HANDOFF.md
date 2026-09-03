@@ -16,6 +16,8 @@ trustworthiness write-up that **only the top 10 may submit**.
 | v5 (anchor bracketing) | 0.746183 |
 | v6 (leak fix + larger refit) | 0.736748 |
 | v7 (transferable features, replay selection) | **0.738568** |
+| linear interpolation (calibration) | 0.802237 |
+| hybrid: v7 on long block + extrapolation, interp elsewhere | 0.753301 |
 | top-10 cutoff | 0.655935 |
 | leader (rank 1) | 0.559588 |
 
@@ -23,28 +25,22 @@ v7 was predicted to move the board a lot (replay ratio 0.891 vs v6's 0.979)
 and moved it by −0.002. This session's work was to find out why and to leave
 the next session with checks that do predict the board.
 
-## The first thing to do: calibrate the board
+## Board calibration (done 2026-09-03)
 
-The board has never been scored against plain interpolation; the ~0.75
-"estimated baseline" in earlier handoffs was a guess. Three files are ready
-(`calib_subs.py` rebuilds them):
+Interpolation scores **0.802237**; v7 0.738568 is a ratio of 0.921, between
+fold 123 (0.934) and the 2015 late check (0.906). The hybrid
+(`submission_hybrid_long.csv`, v7 on `dR ≥ 12` and `dR = 0`, interpolation
+elsewhere) scored 0.753301, so in public-board MSE v7 removes 0.098 of
+interpolation's 0.644: 0.076 on the long block + extrapolation half and 0.022
+on the short bracketed half. The short-span gain is therefore 3–4%, which is
+what the non-junk 2015 months of the late check show (the late check's
+pooled 0.906 is inflated by the junk-anchor months 159/163/164, which the
+test does not have). The late-regime checks predict the board; the pooled
+replay does not. `calib_subs.py` rebuilds the three files.
 
-1. **`submission_interp.csv`** — linear interpolation between anchors,
-   persistence where there is no right anchor. Every offline check puts v7
-   7–18% below this. If the board gives ~0.80, the model-vs-interpolation gain
-   transfers and the only thing that failed was the v6→v7 increment (which
-   fold 123 had predicted at ~1%). If it gives ~0.75, the public subset is
-   doing something none of the checks see, and the diagnosis below is
-   incomplete.
-2. **`submission_hybrid_long.csv`** — v7 on the configurations where fold 123
-   shows a gain (`dR ≥ 12` and `dR = 0`, 50% of rows), interpolation
-   elsewhere. With the two numbers above this localises v7's board gain to the
-   long block + extrapolation vs the short bracketed configs.
-3. `submission_seasonal.csv` — climatology-anchored interpolation, optional
-   control; offline it is worse than linear everywhere because TWS is
-   deseasonalised.
-
-Record all three in README.md's calibration table.
+To reach the top-10 cutoff (0.656, MSE 0.430) another 0.115 MSE has to go —
+21% of what is left. The leader (0.560, MSE 0.313) removes half of
+interpolation's MSE; nothing measured here comes close to that legitimately.
 
 ## Why v7 did not move the board
 
@@ -105,7 +101,7 @@ artefact again. The junk months in training are harmless.
 
 ## Ranked next steps
 
-1. **Submit the calibration files** (above) and decide by the numbers.
+1. ~~Submit the calibration files~~ done; see above.
 2. **Select v8 on the late checks only** (`latecheck.py`, fold 123,
    `pseudotest7.py`); treat the pooled replay as unmeasured.
 3. **Noise-oriented features**, since anchor noise is where the model earns
