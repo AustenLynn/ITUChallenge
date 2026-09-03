@@ -1,7 +1,7 @@
 # ITUChallenge — Zindi global water storage forecasting
 
 **Read `HANDOFF.md` before starting work.** It carries the current standing, the
-transfer diagnosis, the approaches already measured on the honest metric, and
+transfer diagnosis, the approaches already measured on the honest metrics, and
 the rules decision behind the current model. `README.md` has the results tables.
 
 ## Operating notes
@@ -17,8 +17,13 @@ the rules decision behind the current model. `README.md` has the results tables.
 
 ## Before proposing a modelling idea
 
-Measure it on `replay.py` (test-layout replay, cached folds, `--drop` /
-`--halflife` / `--perh` flags), not on an adjacent-window validation. The
-24-month validation used through v6 rewarded memorisation and was the reason
-offline gains failed to reach the leaderboard. `HANDOFF.md` lists what has
-already been measured flat or worse on the replay.
+Measure it on the **late-regime** checks — `latecheck.py` (2015 short blocks,
+cached), `replay.py --folds 123`, and `pseudotest7.py` (real test-period
+labels) — not on the pooled replay and not on an adjacent-window validation.
+The pooled replay is dominated by folds 44/56/68, which sit in a 2005–2011
+regime where covariates couple to TWS twice as strongly as they do in the test
+years; v7 was selected on it and did not move the board. `HANDOFF.md` lists
+what has already been measured on each check.
+
+TWS is deseasonalised: never add climatology features, and do not propose
+seasonal interpolation.

@@ -16,3 +16,7 @@ cache_*.npz
 
 # Run logs
 logs/
+
+# Calibration submissions (regenerate with calib_subs.py)
+submission_*.csv
+cell_lag1.npy
