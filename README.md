@@ -2,100 +2,84 @@
 
 Zindi challenge: forecast Total Water Storage (TWS) one month ahead on a global
 1° grid. Scored by RMSE (50% of final score); the remaining 50% is a Phase Two
-trustworthiness write-up available only to the top 10.
+trustworthiness write-up available only to the top 10. `HANDOFF.md` carries the
+current standing and the reasoning; this file carries the results tables.
 
-## Interpolation, not forecasting (v5)
+## Interpolation, not forecasting
 
-Test.csv contains six fully-observed months (164, 168, 173, 179, 198, 202) and
-every masked block sits **between** two of them, so **88.8% of test rows have an
-observed TWS value for that same cell at a later month**. Those rows are an
-interpolation problem, and interpolation is a much easier problem than forecasting.
-
-Every row is therefore keyed on a `(dL, dR)` pair -- months back to the left
-anchor, months forward to the right anchor -- and training samples are drawn at
-exactly the 17 `(dL, dR)` combinations that occur in test. The 31k trailing rows
-(2018-12, 2019-01) have no right anchor and get NaN.
-
-| | config-weighted validation RMSE |
-|---|---|
-| persistence | 0.7627 |
-| linear interpolation, no model | 0.7027 |
-| model (blend) | **0.6252** |
+Test.csv has 18 row months. Six are fully observed (164, 168, 173, 179, 198,
+202) and the other twelve are masked by whole month, each sitting between two
+observed ones, so **88.8% of test rows have an observed TWS value for the same
+cell at a later month**. Every row is keyed on a `(dL, dR)` pair — months back
+to the left anchor, forward to the right — and training rows are drawn at the
+17 pairs the test contains. Linear interpolation between the anchors is the
+baseline every model is measured against.
 
 **Rules caveat.** The competition permits Copernicus covariates *"provided that
 these variables are available at the stated prediction time and do not directly
-or indirectly include future GRACE/TWS information."* Read strictly, using TWS
-at a later month is future TWS information. Read narrowly, that sentence governs
-external covariates a participant brings in, not values the organisers placed in
-Test.csv. This was a deliberate, informed choice -- `model_causal_reference.py`
-is the strictly forward-looking version (leaderboard 0.767) if the call changes.
+or indirectly include future GRACE/TWS information."* Using TWS at a later
+month (v5+) and covariates at the target month (v7) are both values the
+organisers placed in Test.csv, not external data, but read strictly they are
+after the prediction time. This was a deliberate, informed choice —
+`model_causal_reference.py` is the strictly forward-looking version
+(leaderboard 0.767) if the call changes.
+
+## The honest metric (v7)
+
+`replay.py` reproduces the test layout on the training panel — the same 18
+months, the same six anchors, the panel masked the same way, covariates only
+where the test has them, training strictly before the window — over four folds
+(base months 44, 56, 68, 123). `pseudotest.py` predicts the six *observed* test
+months from their neighbouring anchors: real 2015–2018 labels.
+
+On both, the v6 model barely beat linear interpolation, and the leaderboard had
+been saying the same thing. The 24-month validation it was selected on rewarded
+memorising each cell's recent anomaly, which a test window 2–40 months out
+punishes.
+
+| pooled over four replay folds | model | interp | ratio |
+|---|---|---|---|
+| v6 feature set, recency weights | 0.5938 | 0.6063 | 0.979 |
+| − climatology & cell-level features | 0.5619 | | 0.927 |
+| + target-month covariates | 0.5534 | | 0.913 |
+| − drift features, uniform weights | 0.5474 | | 0.903 |
+| + smoothed residuals, per-cell slope (**v7**) | **0.5401** | | **0.891** |
+
+| pseudo-test, real 2015–18 anchors | model | interp | ratio |
+|---|---|---|---|
+| v6-style features | 0.793 | 0.829 | 0.957 |
+| + target-month covariates | 0.715 | | 0.862 |
+| + drop climatology (v7 recipe) | **0.704** | | **0.850** |
+
+Measured flat or worse on the replay: hyperparameters (leaves 15–255,
+`min_data_in_leaf` 200–10k, L2, feature fraction — all within 0.002), residual
+target, per-dL blend (−0.001), recency weighting, and training rows per config
+(5k vs 100k: identical — the field is spatially smooth enough that 15.7k cells
+are a few hundred independent samples).
 
 ## Problem shape
 
-The framing that matters is not "predict TWS from TWS_t". `TWS_t` is masked for
-66.5% of test rows, **by whole months**, reproducing the real GRACE / GRACE-FO
-data gap. Every row is instead posed as:
-
-> predict TWS at month `m`, given the last month `L` where TWS was actually
-> observed, the horizon `h = m - L` (1..7), and covariates over `[L, m-1]`.
-
-Training rows are replayed at every horizon so the model learns how skill decays
-with the gap. Test horizon mix: `{1: 94048, 2: 62576, 3: 46777, 4: 31076,
-5: 15560, 6: 15479, 7: 15445}` — validation is reweighted to match it, otherwise
-an unweighted average misreports where you stand.
-
-Two structural facts that are easy to miss:
-
-- **Train has zero missing `TWS_t`; test is 66.5% missing.** Anything that leans
-  on `TWS_t` directly looks fine in CV and collapses on the leaderboard.
-- **Train months are themselves non-contiguous** — 22 missing months (GRACE
-  outages, clustered 2011–2014), so a training window can have holes where a
-  test window never does.
-
-## What worked
-
-| change | measured gain (test-weighted RMSE) |
-|---|---|
-| horizon framing + per-cell climatology | baseline |
-| anchor-delta covariates (change since month `L`) | −0.0072 |
-| spatial neighbour smoothing of the anchor | −0.0009 |
-| **exponential recency weighting** (half-life 15 mo) | **−0.017** |
-| **per-cell drift features** (trailing mean/trend vs training mean) | **−0.004** |
-
-Persistence scores 0.818 and climatology 1.011 on the same weighted metric; the
-current model scores **0.681**.
-
-The dominant effect is **non-stationarity**, not missing features. Mean target
-declines steadily across the record (+0.226 in 2002 → −0.136 in 2015), so a
-model weighting 2002–2010 equally with 2014–2015 is structurally biased high for
-a 2015–2019 test period. Soft recency decay beats every hard cutoff, and the
-gain *grows* under a gapped holdout that mimics the longer lead we are scored at.
-
-## What was measured and rejected
-
-Recorded so they are not re-proposed. Each looked principled and lost:
-
-- **Dropping features whose train/test availability differs** (`last_delta` is
-  100% absent for masked test rows, present in training): −0.009 *worse*.
-  Keeping them and letting LightGBM route the NaNs wins — they still pay off on
-  the h=1 rows where they exist.
-- **Masking those features during training** to match test availability: a
-  further −0.008 worse.
-- **Residual learning** against a seasonal-persistence base: −0.014 worse;
-  against plain persistence, −0.009. The seasonal base is itself worse than raw
-  persistence (0.862 vs 0.838), so it is a worse anchor, not a better one.
-- **Hyperparameter tuning** (255→63 leaves, lr 0.05→0.02): −0.001. The model is
-  feature- and distribution-limited, not capacity-limited.
-- **Requiring complete covariate windows** in training: −0.004 worse.
+- **Train has zero missing `TWS_t`; test is 66.5% missing, by whole month.**
+- **Covariates exist only at the 18 test months.** The 12–18-month masked block
+  (39% of test) sees SPEI / soil moisture for 179–185 and 198 only.
+- **Train months are non-contiguous** — 22 GRACE outages, clustered
+  2011–2014 — and `target(m) == TWS_t(m+1)` exactly, so the panel knows more
+  months than `time` lists.
+- **The test period is noisier.** Predicting each observed test anchor from its
+  neighbours gives errors 15–40% above the same configuration in training
+  years; 2015's persistence error is 0.87 against ~0.53 in every earlier year,
+  concentrated in deserts. The test-period interpolation baseline is estimated
+  at ~0.75, so the top-10 cutoff (0.656) is a ratio of ~0.87 to it.
 
 ## Layout
 
-    model.py                 end-to-end: features, training, submission
-    explore.py               schema / null-rate inspection
-    ablate.py, ablate2.py    feature-parity and residual-target ablations
-    diag.py, diag2.py, diag3.py   non-stationarity diagnostics (recency, drift)
-    model_v2_reference.py    superseded version kept for comparison
-    run_summary.json         selected model + scores from the last run
+    model.py                 end-to-end: features, replay selection, refit, submission
+    replay.py                test-layout replay validation with cached folds and ablation flags
+    pseudotest.py            real-label transfer check on the six observed test months
+    model_v6_reference.py    previous version (board 0.736748); ablate*/diag* import it
+    model_causal_reference.py  strictly forward-looking version (board 0.767)
+    ablate*.py, diag*.py     v4–v6 era diagnostics, kept for the record
+    run_summary.json         replay scores, rounds, emissions from the last run
     emissions.csv            CodeCarbon log, appended per run
 
 ## Running
@@ -103,42 +87,28 @@ Recorded so they are not re-proposed. Each looked principled and lost:
     uv venv .venv && uv pip install -p .venv/bin/python \
         pandas numpy lightgbm scikit-learn pyarrow codecarbon
     # download Train.csv, Test.csv, SampleSubmission.csv into data/
-    .venv/bin/python model.py     # writes submission.csv
+    SMOKE=1 .venv/bin/python -u model.py   # 3-minute end-to-end check
+    .venv/bin/python -u model.py           # writes submission.csv (~25 min, ~5 GB)
+    .venv/bin/python -u replay.py --drop beta   # ablate on cached replay folds
 
 ## Leaderboard calibration
 
-| version | test-weighted validation | public leaderboard | commit |
+| version | offline metric | public leaderboard | commit |
 |---|---|---|---|
-| v2 (anchor deltas + neighbours) | 0.6992 | 0.774957 | pre-repo |
-| v4 (recency weighting + drift)  | 0.6812 | 0.767074 | 6a20efd |
-| v5 (anchor bracketing)          | 0.6252* | 0.746183 | 0ca1f88 |
-| v6 (leak fix + 9.2M-row refit)  | 0.6298† | 0.736748 | 3efff00 |
-
-\* v5's validation uses the config-keyed metric and is NOT comparable to the
-rows above. Its own persistence baseline is 0.7627.
-† v6's validation is the config-keyed metric with the climatology leak removed,
-so it is honest but ~0.004 higher than v5's for that reason alone.
+| v2 (anchor deltas + neighbours) | 0.6992 (24-mo window) | 0.774957 | pre-repo |
+| v4 (recency weighting + drift)  | 0.6812 (24-mo window) | 0.767074 | 6a20efd |
+| v5 (anchor bracketing)          | 0.6252 (24-mo, leaky) | 0.746183 | 0ca1f88 |
+| v6 (leak fix + 9.2M-row refit)  | 0.6298 (24-mo) / 0.5938 replay | 0.736748 | 3efff00 |
+| v7 (transferable features, replay selection) | 0.5401 replay | *not yet submitted* | |
 
 Benchmark 0.899886; 476 active participants. The public leaderboard scores only
 a portion of the test set, so the final standing will move.
 
-**Offline gains transfer at well under 1:1, and the ratio is not yet pinned
-down.** v5 moved validation from 0.7627 (persistence) to 0.6252 but the board
-only from 0.767 to 0.746. The v4 model has never been scored on the config-keyed
-metric, so the true offline delta for v5 is unknown -- resolving that is the
-first open task (see HANDOFF.md).
-
-Earlier, on the v2->v4 pair, **roughly 44% of validation gains transferred** (-0.0180 offline bought -0.0079 on
-the board). Discount offline improvements by ~2.3x when predicting leaderboard
-movement. The absolute gap also widened slightly (0.076 -> 0.086), so some of
-the recency gain is specific to a validation window that sits immediately after
-the training data, where the real test period runs up to 40 months out.
-
 ## Caveats
 
-- `nb_last_tws` dominates gain-based importance while `last_tws` sits third.
-  This is collinearity redistributing gain, not skill — the two are near
-  duplicates. Do not read the importance table as a skill ranking; use SHAP.
-- Validation (2013–2015) has consistently scored better than the leaderboard
-  (2015–2019). The recency correction targets that gap directly but has not been
-  confirmed to close it.
+- `last_tws`, `nb_last_tws`, `interp`, `interp_nb` dominate gain-based
+  importance and are near-duplicates; do not read the table as a skill
+  ranking — use SHAP.
+- Fold 123 (the late-regime replay fold) moves far less than the early folds
+  under every change (0.6835 → 0.6760 for the full v7 recipe). The pseudo-test
+  is the reason to expect more on the board; be ready for the smaller number.

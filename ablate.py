@@ -6,7 +6,7 @@ validation against the known leaderboard score of the v2 feature set.
 """
 import numpy as np, pandas as pd, lightgbm as lgb
 from sklearn.metrics import mean_squared_error
-import model as M
+import model_v6_reference as M   # written against the v6 feature API
 
 N_PER_H, SEED = 300_000, 0
 LEAKY = ["last_delta", "SPEI_06_t_d1", "SOIL_MOISTURE_t_d1"]

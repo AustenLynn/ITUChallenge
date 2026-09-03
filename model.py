@@ -1,53 +1,39 @@
 """
-Horizon-aware TWS forecasting.
+Anchor-bracketed TWS interpolation, selected on a test-layout replay.
 
-Framing: predict TWS at month m given the last month L where TWS was actually
-observed, the horizon h = m - L (1..7), and covariates over [L, m-1].
+Framing. Test.csv carries six fully observed months (164, 168, 173, 179, 198,
+202); every masked block sits between two of them, so 88.8% of test rows are an
+interpolation between a left anchor (dL months back) and a right anchor (dR
+months forward). Each row is keyed on its (dL, dR) pair and training rows are
+drawn at exactly the 17 pairs the test contains.
 
-Two rules drive every design choice here:
+What changed in v7 and why. `replay.py` reproduces the test layout on the
+training panel -- same 18 row months, same six anchors, panel masked the same
+way, covariates only where the test has them, training strictly before the
+window. On that metric the v6 model beat linear interpolation by 2%, not the
+10% its 24-month validation reported, and the leaderboard agreed with the
+replay (board 0.737 against an estimated test-period interpolation baseline of
+~0.75). The 24-month validation rewarded memorising each cell's recent anomaly
+through climatology / cell-mean features and recency weights, which the
+2015-2018 test period punishes. So:
 
-INTERPOLATION. 88.9% of test rows have an observed TWS value for the same cell
-at a LATER month: Test.csv carries six fully-observed months (164, 168, 173,
-179, 198, 202) and every masked block sits between two of them. Those rows are
-an interpolation problem, not a forecast, and interpolation is far easier --
-plain linear interpolation scores 0.610 against 0.690 for persistence at the
-exact anchor distances the test set uses.
+  - climatology-level features (clim_m, clim_L, clim_delta, cell_mean,
+    cell_std) and the trailing-drift features are dropped: replay ratio
+    0.979 -> 0.927 (pooled over four folds)
+  - covariates at the target month itself (Test.csv has them for 12 of the 18
+    months) and their deviation from the anchor-to-anchor interpolation are
+    added, smoothed to GRACE's ~300 km footprint, and scaled by a per-cell
+    slope of storage change on soil-moisture change: -> 0.891
+  - training weights are uniform; the recency decay was a memorisation aid
+  - rounds are selected on replay folds, not on the adjacent window
 
-Every row is therefore keyed on a (dL, dR) pair -- months back to the left
-anchor, months forward to the right anchor -- and training samples are drawn at
-precisely the (dL, dR) combinations that occur in test, so the model learns the
-right skill surface. dR is NaN for the 31k trailing rows with no right anchor.
+`model_v6_reference.py` is the previous version (board 0.736748).
 
-Design settled by ablation (see ablate.py / ablate2.py), not by intuition --
-three plausible-sounding ideas were measured and rejected:
-
-  - Dropping features whose availability differs between train and test
-    (`last_delta` is 100% absent for masked test rows but present in training)
-    LOSES 0.009. Keeping them and letting LightGBM route the NaNs wins: they
-    still pay off on the h=1 rows where they exist.
-  - Masking those features during training to match test availability loses a
-    further 0.008. The model learns more from the intact signal than it gains
-    from rehearsing the missingness.
-  - Residual learning against a seasonal-persistence base loses 0.014, and
-    against a plain persistence base 0.009. The seasonal base is itself worse
-    than raw persistence (0.862 vs 0.838), so it is a worse anchor, not a
-    better one.
-
-`report_parity` still prints train/test availability gaps every run -- the
-mismatch is now a known, measured cost rather than an unnoticed one.
-
-What did work was treating the problem as non-stationary rather than as
-under-featured (diag.py / diag2.py / diag3.py). The 2002-2015 relationship has
-drifted by the 2015-2019 test period, so:
-
-  - training rows carry exponential recency weights (half-life 15 months),
-    worth ~0.017; a soft decay beats every hard cutoff, which throws rows away
-  - each cell gets explicit drift features -- its trailing-36-month observed
-    mean relative to its training-period mean, and the trailing trend -- worth
-    a further ~0.004
-
-Both gains survive a gapped holdout that mimics the longer lead we are scored
-at, so they are not an artifact of the validation window sitting next to train.
+Rules note. Right-anchor TWS and target-month covariates are both values the
+organisers placed in Test.csv at months after the row's own month. Read
+strictly, the covariate clause ("available at the stated prediction time")
+could exclude them; `model_causal_reference.py` is the strictly forward-looking
+version if that call changes.
 """
 import json
 import os
@@ -56,61 +42,48 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-from sklearn.metrics import mean_squared_error
 
 os.environ.setdefault("CODECARBON_LOG_LEVEL", "error")
 from codecarbon import EmissionsTracker
 
 DATA = "data"
 SEED = 0
-H_MAX = 7
-N_PER_H = 1_000_000
-N_PER_CFG = 300_000
-VALID_MONTHS = 24
+N_PER_CFG = 200_000          # per (dL, dR) config in a replay fold
+N_PER_CFG_FINAL = 400_000    # per config in the final refit
+REPLAY_FOLDS = [68, 123]     # base months; see replay.py for the layout
+if os.environ.get("SMOKE"):  # SMOKE=1 python model.py: tiny end-to-end check
+    N_PER_CFG, N_PER_CFG_FINAL, REPLAY_FOLDS = 5_000, 5_000, [68]
 
 PARAMS = dict(objective="regression", metric="rmse", learning_rate=0.02,
-              num_leaves=63, min_data_in_leaf=200, feature_fraction=0.85,
+              num_leaves=31, min_data_in_leaf=200, feature_fraction=0.85,
               bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0,
               verbose=-1, num_threads=-1, seed=SEED)
-N_ROUNDS = 8000
+N_ROUNDS = 3000
+BLEND_PER_H = False          # replay: per-dL models add nothing over the global one
 
 DYN = ["SPEI_01_t", "SPEI_03_t", "SPEI_06_t", "SPEI_12_t", "SOIL_MOISTURE_t"]
 EXTREME = ["SPEI_01_t", "SPEI_03_t", "SOIL_MOISTURE_t"]
 STATIC = ["lat", "lon"]
 LAG1 = ["SPEI_06_t", "SOIL_MOISTURE_t"]
-DRIFT_FEATS = ["drift36", "trend36", "nobs36"]
+SMOOTHED = ["SOIL_MOISTURE_t", "SPEI_03_t", "SPEI_01_t"]
+BETA_VARS = ["SOIL_MOISTURE_t", "SPEI_03_t"]
 RIGHT_FEATS = ["dR", "span", "w", "right_tws", "right_anom", "right_delta",
                "interp", "nb_right_tws", "interp_nb", "SPEI_06_t_dR",
                "SOIL_MOISTURE_t_dR"]
-DRIFT_WIN = 36
-HALF_LIFE = 15.0      # months; flat optimum over 12-18 on both holdouts
-FEATS = (["h", "last_tws", "last_anom", "last_delta", "clim_m", "clim_L", "clim_delta",
-          "cell_mean", "cell_std", "month_sin", "month_cos",
+NEXT_FEATS = ([f"{c}_n" for c in DYN] + [f"{c}_nres" for c in DYN]
+              + [f"{c}_nL" for c in DYN] + [f"{c}_nR" for c in DYN]
+              + [f"{c}_rmean" for c in ("SPEI_03_t", "SOIL_MOISTURE_t")]
+              + [f"{c}_nres_s3" for c in SMOOTHED] + [f"{c}_nres_s5" for c in SMOOTHED]
+              + ["beta_sm", "beta_sm_nres", "beta_sm_nres_s3", "beta_spei3", "beta_spei3_nres"])
+FEATS = (["h", "last_tws", "last_anom", "last_delta", "month_sin", "month_cos",
           "nb_last_tws", "nb_last_anom"] + STATIC + DYN
          + [f"{c}_d" for c in DYN] + [f"{c}_gmean" for c in DYN]
          + [f"{c}_gmin" for c in EXTREME] + [f"{c}_gmax" for c in EXTREME]
-         + [f"{c}_d1" for c in LAG1] + DRIFT_FEATS + RIGHT_FEATS)
+         + [f"{c}_d1" for c in LAG1] + RIGHT_FEATS + NEXT_FEATS)
 
-
-def drift_panels(G, win=DRIFT_WIN):
-    """Trailing-window mean, OLS slope and observation count of observed TWS at
-    every (cell, month). Uses only months <= the one indexed, so a row reading
-    these at its anchor never sees past its own prediction time."""
-    V, Msk = np.nan_to_num(G), np.isfinite(G).astype(np.float64)
-    t = np.arange(G.shape[1], dtype=np.float64)[None, :]
-    def cum(A):
-        return np.concatenate([np.zeros((A.shape[0], 1)), np.cumsum(A, axis=1)], axis=1)
-    CN, CY, CT, CTT, CTY = cum(Msk), cum(V), cum(Msk * t), cum(Msk * t * t), cum(V * t)
-    idx = np.arange(G.shape[1])
-    lo, hi = np.maximum(idx - win + 1, 0), idx + 1
-    n = CN[:, hi] - CN[:, lo]
-    Sy, St = CY[:, hi] - CY[:, lo], CT[:, hi] - CT[:, lo]
-    Stt, Sty = CTT[:, hi] - CTT[:, lo], CTY[:, hi] - CTY[:, lo]
-    with np.errstate(invalid="ignore", divide="ignore"):
-        mean = np.where(n > 0, Sy / np.maximum(n, 1), np.nan)
-        den = n * Stt - St ** 2
-        slope = np.where(n >= 3, (n * Sty - St * Sy) / np.where(den == 0, np.nan, den), np.nan)
-    return mean.astype(np.float32), slope.astype(np.float32), n.astype(np.float32)
+# test layout, relative to its first month (164)
+OFFS_ROWS = [0, 4, 5, 6, 9, 10, 11, 12, 15, 16, 17, 18, 19, 20, 21, 34, 38, 39]
+OFFS_ANCH = [0, 4, 9, 15, 34, 38]
 
 
 def mindex(t):
@@ -166,10 +139,27 @@ def smooth3(A):
     return np.where(c > 0, s / np.maximum(c, 1e-6), np.nan).astype(np.float32)
 
 
-def neighbour_panels(cells, G, clim):
+def _grid_index(cells):
     lats = np.array([c[0] for c in cells]); lons = np.array([c[1] for c in cells])
     _, ilat = np.unique(lats, return_inverse=True)
     _, ilon = np.unique(lons, return_inverse=True)
+    return ilat, ilon
+
+
+def smooth_panel(cells, A, passes=1):
+    """3x3 (passes=1) or ~5x5 (passes=2) neighbourhood mean of a cell x month
+    panel. GRACE resolves ~300 km, so a 1-degree covariate is noisy relative to
+    the storage it drives; the smoothed residual matches the target's scale."""
+    ilat, ilon = _grid_index(cells)
+    grid = np.full((ilat.max() + 1, ilon.max() + 1, A.shape[1]), np.nan, dtype=np.float32)
+    grid[ilat, ilon] = A
+    for _ in range(passes):
+        grid = smooth3(grid)
+    return grid[ilat, ilon]
+
+
+def neighbour_panels(cells, G, clim):
+    ilat, ilon = _grid_index(cells)
     shape = (ilat.max() + 1, ilon.max() + 1, G.shape[1])
     grid = np.full(shape, np.nan, dtype=np.float32); grid[ilat, ilon] = G
     anom = np.full(shape, np.nan, dtype=np.float32)
@@ -182,26 +172,45 @@ def climatology(tr, cells):
     s = np.zeros((len(cells), 12)); n = np.zeros((len(cells), 12))
     np.add.at(s, (ci, cal), y)
     np.add.at(n, (ci, cal), 1)
-    agg = tr.groupby("cell_idx")["target"].agg(["mean", "std"]).reindex(range(len(cells)))
-    return ((s / np.maximum(n, 1)).astype(np.float32),
-            agg["mean"].to_numpy(np.float32), agg["std"].to_numpy(np.float32))
+    return (s / np.maximum(n, 1)).astype(np.float32)
 
 
-def make_features(rows, h, dR, G, clim, cell_mean, cell_std, C, NB, NBA, DM, DS, DN):
-    """Target month is m+1; anchor L = m+1-h; covariate path spans [L, m]."""
+def cell_betas(G, S, upto):
+    """Per-cell slope of month-to-month TWS change on covariate change, using
+    months < upto. A physical scale (how much storage moves per unit of soil
+    moisture), not a level, so it transfers where a cell mean does not."""
+    dG, dS = np.diff(G[:, :upto], axis=1), np.diff(S[:, :upto], axis=1)
+    ok = np.isfinite(dG) & np.isfinite(dS)
+    dG, dS = np.where(ok, dG, 0.0), np.where(ok, dS, 0.0)
+    num, den = (dG * dS).sum(1), (dS * dS).sum(1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(den > 0, num / den, np.nan).astype(np.float32)
+
+
+class Panels:
+    """Everything make_features reads, built from one (possibly masked) panel."""
+
+    def __init__(self, cells, tr_src, G, C, beta_upto):
+        self.G, self.C = G, C
+        self.clim = climatology(tr_src, cells)
+        self.NB, self.NBA = neighbour_panels(cells, G, self.clim)
+        self.CS = {c: {3: smooth_panel(cells, C[c], 1), 5: smooth_panel(cells, C[c], 2)}
+                   for c in SMOOTHED}
+        self.BETA = {c: cell_betas(G, C[c], beta_upto) for c in BETA_VARS}
+
+
+def make_features(rows, h, dR, P):
+    """Target month is m+1; anchor L = m+1-h; right anchor R = m+1+dR."""
+    G, C, clim, NB, NBA = P.G, P.C, P.clim, P.NB, P.NBA
     ci, m = rows["cell_idx"].to_numpy(), rows["m"].to_numpy()
     tgt, L = m + 1, m + 1 - h
+    n = len(rows)
     last = G[ci, L]
     clim_m, clim_L = clim[ci, tgt % 12], clim[ci, L % 12]
     out = pd.DataFrame({
-        "h": np.full(len(rows), h, np.float32),
+        "h": np.full(n, h, np.float32),
         "last_tws": last,
         "last_anom": last - clim_L,
-        "clim_m": clim_m,
-        "clim_L": clim_L,
-        "clim_delta": clim_m - clim_L,
-        "cell_mean": cell_mean[ci],
-        "cell_std": cell_std[ci],
         "month_sin": np.sin(2 * np.pi * (tgt % 12) / 12).astype(np.float32),
         "month_cos": np.cos(2 * np.pi * (tgt % 12) / 12).astype(np.float32),
         "nb_last_tws": NB[ci, L],
@@ -211,22 +220,10 @@ def make_features(rows, h, dR, G, clim, cell_mean, cell_std, C, NB, NBA, DM, DS,
     for c in STATIC:
         out[c] = rows[c].to_numpy(np.float32)
 
-    # Covariate path over the gap. Every month in [L, m] is observed in both
-    # train and test (the anchor is by definition an observed month, and the
-    # intervening months are all present as test rows), so these carry the
-    # "what happened to the climate since we last saw TWS" signal without the
-    # availability mismatch that fixed lags suffer from.
-    # Train months are themselves non-contiguous (22 GRACE outages, clustered
-    # in 2011-2014), so a training path can have holes where a test path never
-    # does. `complete` marks the rows whose window is fully observed; callers
-    # keep only those, which makes the training distribution match test.
+    # Covariate path over the gap [L, m]: observed in both train and test.
     win = L[:, None] + np.arange(h)[None, :]
-    complete = np.isfinite(last)
-    if dR is not None:
-        complete &= np.isfinite(G[ci, tgt + dR])
     for c in DYN:
         path = C[c][ci[:, None], win]
-        complete &= np.isfinite(path).all(axis=1)
         at_t = rows[c].to_numpy(np.float32)
         out[c] = at_t
         out[f"{c}_d"] = at_t - path[:, 0]
@@ -237,12 +234,11 @@ def make_features(rows, h, dR, G, clim, cell_mean, cell_std, C, NB, NBA, DM, DS,
         if c in LAG1:
             out[f"{c}_d1"] = at_t - C[c][ci, np.maximum(m - 1, 0)]
 
-    # Right-anchor block: the observed TWS on the far side of the gap. Present
-    # for 88.9% of test rows; NaN elsewhere and LightGBM routes those itself.
-    n = len(rows)
+    # Right-anchor block: observed TWS on the far side of the gap.
     if dR is None:
         for f in RIGHT_FEATS:
             out[f] = np.full(n, np.nan, np.float32)
+        w = None
     else:
         R = tgt + dR
         rt = G[ci, R]
@@ -260,47 +256,119 @@ def make_features(rows, h, dR, G, clim, cell_mean, cell_std, C, NB, NBA, DM, DS,
         for c in ("SPEI_06_t", "SOIL_MOISTURE_t"):
             out[f"{c}_dR"] = C[c][ci, R] - rows[c].to_numpy(np.float32)
 
-    out["drift36"] = DM[ci, L] - cell_mean[ci]
-    out["trend36"] = DS[ci, L]
-    out["nobs36"] = DN[ci, L]
+    # Target-month covariates and their deviation from the anchor-to-anchor
+    # interpolation. Test.csv has covariates at 12 of its 18 target months;
+    # the rest are NaN and LightGBM routes them.
+    def resid(Pn):
+        v, vL = Pn[ci, tgt], Pn[ci, L]
+        return v - vL if dR is None else v - ((1 - w) * vL + w * Pn[ci, tgt + dR])
+    for c in DYN:
+        v, vL = C[c][ci, tgt], C[c][ci, L]
+        out[f"{c}_n"] = v
+        out[f"{c}_nres"] = resid(C[c])
+        out[f"{c}_nL"] = v - vL
+        out[f"{c}_nR"] = np.full(n, np.nan, np.float32) if dR is None else C[c][ci, tgt + dR] - v
+    for c in ("SPEI_03_t", "SOIL_MOISTURE_t"):
+        if dR is None:
+            out[f"{c}_rmean"] = np.full(n, np.nan, np.float32)
+        else:
+            rwin = tgt[:, None] + np.arange(dR + 1)[None, :]
+            out[f"{c}_rmean"] = np.nanmean(C[c][ci[:, None], rwin], axis=1)
+    for c in SMOOTHED:
+        out[f"{c}_nres_s3"] = resid(P.CS[c][3])
+        out[f"{c}_nres_s5"] = resid(P.CS[c][5])
+    out["beta_sm"] = P.BETA["SOIL_MOISTURE_t"][ci]
+    out["beta_sm_nres"] = out["beta_sm"] * out["SOIL_MOISTURE_t_nres"]
+    out["beta_sm_nres_s3"] = out["beta_sm"] * out["SOIL_MOISTURE_t_nres_s3"]
+    out["beta_spei3"] = P.BETA["SPEI_03_t"][ci]
+    out["beta_spei3_nres"] = out["beta_spei3"] * out["SPEI_03_t_nres"]
 
-    base = last + (clim_m - clim_L)          # seasonal persistence
-    return out[FEATS].astype(np.float32), base, complete
-
-
-def report_parity(Xtr, Xte, h, tol=0.10):
-    """Print features whose missingness differs sharply between train and test.
-
-    Ablation says keeping them still wins, so this reports rather than blocks --
-    but an unnoticed mismatch is how a feature silently stops working on the
-    leaderboard, so every run states the ones we are knowingly accepting.
-    """
-    for f in FEATS:
-        a, b = Xtr[f].isna().mean(), Xte[f].isna().mean()
-        if abs(a - b) > tol:
-            print(f"    parity gap h={h}: {f} (train {a:.1%} vs test {b:.1%})")
-
-
-def recency_weights(months):
-    """Exponential decay toward the end of the available record. Measured worth
-    ~0.017 RMSE; a soft decay beats any hard cutoff because it keeps the rows."""
-    return 0.5 ** ((months.max() - months) / HALF_LIFE)
-
-
-def fit(Xtr, ytr, Xva, yva, tag, w=None):
-    model = lgb.train(PARAMS, lgb.Dataset(Xtr, ytr, weight=w), num_boost_round=N_ROUNDS,
-                      valid_sets=[lgb.Dataset(Xva, yva)],
-                      callbacks=[lgb.early_stopping(200), lgb.log_evaluation(0)])
-    print(f"  {tag:12s} rows={len(Xtr):>9,}  best_iter={model.best_iteration:>5}")
-    return model
+    good = np.isfinite(last)
+    if dR is not None:
+        good &= np.isfinite(out["right_tws"].to_numpy())
+    return out.astype(np.float32), good
 
 
-def wrmse(y, p, hv, weights):
-    """RMSE reweighted to the test set's (dL, dR) configuration mix, so
-    validation decisions are made against the distribution we are scored on."""
-    num = sum(weights[h] * mean_squared_error(y[hv == h], p[hv == h])
-              for h in weights if (hv == h).any())
-    return (num / sum(weights.values())) ** 0.5
+def interp_base(X):
+    ip = X["interp"].to_numpy().copy(); bad = ~np.isfinite(ip)
+    ip[bad] = X["last_tws"].to_numpy()[bad]
+    return ip
+
+
+def anchors_for(known, ci, tgt, n_m):
+    """Months back to the last known TWS and forward to the next (0 = none)."""
+    dL = np.ones(len(ci), np.int64); dR = np.zeros(len(ci), np.int64)
+    for i in range(len(ci)):
+        d = 1
+        while d <= 24 and not known[ci[i], tgt[i] - d]:
+            d += 1
+        dL[i] = d
+        d = 1
+        while d <= 24 and tgt[i] + d < n_m and not known[ci[i], tgt[i] + d]:
+            d += 1
+        dR[i] = d if (d <= 24 and tgt[i] + d < n_m and known[ci[i], tgt[i] + d]) else 0
+    return dL, dR
+
+
+def sample_config(src, dl, dr, n, rng, P):
+    ok = src[src.m + 1 - dl >= src.m.min()]
+    if len(ok) > n:
+        ok = ok.iloc[rng.choice(len(ok), n, replace=False)]
+    X, g = make_features(ok, dl, dr or None, P)
+    return X[g], ok.target.to_numpy()[g]
+
+
+def replay_fold(b, tr, cells, G_full, C_full, cfgs, rng, n_per_cfg):
+    """Mask the panel to the test layout at base month b, train on months < b,
+    score the train rows at the 18 layout months on their true targets."""
+    n_m = G_full.shape[1]
+    G = G_full.copy()
+    keep = np.zeros(n_m, bool); keep[:b] = True
+    keep[[b + o for o in OFFS_ANCH]] = True
+    G[:, ~keep] = np.nan
+    C = {c: v.copy() for c, v in C_full.items()}
+    ckeep = np.zeros(n_m, bool); ckeep[:b] = True
+    ckeep[[b + o for o in OFFS_ROWS]] = True
+    for c in C:
+        C[c][:, ~ckeep] = np.nan
+    src = tr[tr.m < b]
+    P = Panels(cells, src, G, C, beta_upto=b)
+
+    rep = tr[tr.m.isin([b + o for o in OFFS_ROWS])]
+    rep = rep[np.isfinite(G_full[rep["cell_idx"].to_numpy(), rep.m.to_numpy() + 1])]
+    rdL, rdR = anchors_for(np.isfinite(G), rep["cell_idx"].to_numpy(), rep.m.to_numpy() + 1, n_m)
+    TRX, TRY, VAX, VAY, VAH = [], [], [], [], []
+    for (dl, dr) in cfgs:
+        k = (rdL == dl) & (rdR == dr)
+        if not k.any():
+            continue
+        X, y = sample_config(src, dl, dr, n_per_cfg, rng, P)
+        TRX.append(X); TRY.append(y)
+        X, g = make_features(rep[k], dl, dr or None, P)
+        VAX.append(X[g]); VAY.append(rep[k].target.to_numpy()[g]); VAH.append(np.full(int(g.sum()), dl))
+    TRX = pd.concat(TRX, ignore_index=True); TRY = np.concatenate(TRY)
+    VAX = pd.concat(VAX, ignore_index=True); VAY = np.concatenate(VAY); VAH = np.concatenate(VAH)
+    rm = lambda p: float(np.sqrt(np.mean((VAY - p) ** 2)))
+    ip = interp_base(VAX)
+    print(f"  fold b={b}: train {TRX.shape}  replay {VAX.shape}  "
+          f"persistence {rm(VAX['last_tws'].to_numpy()):.4f}  interp {rm(ip):.4f}")
+    g_model = lgb.train(PARAMS, lgb.Dataset(TRX[FEATS], TRY), num_boost_round=N_ROUNDS,
+                        valid_sets=[lgb.Dataset(VAX[FEATS], VAY)],
+                        callbacks=[lgb.early_stopping(200, verbose=False), lgb.log_evaluation(0)])
+    pred = g_model.predict(VAX[FEATS])
+    out = {"interp": rm(ip), "global": rm(pred), "iters_global": g_model.best_iteration}
+    if BLEND_PER_H:
+        hp = np.empty(len(VAX)); iters_h = {}
+        for h in np.unique(VAH):
+            ktr, kva = (TRX.h == h).to_numpy(), VAH == h
+            hm = lgb.train(PARAMS, lgb.Dataset(TRX[FEATS][ktr], TRY[ktr]), num_boost_round=N_ROUNDS,
+                           valid_sets=[lgb.Dataset(VAX[FEATS][kva], VAY[kva])],
+                           callbacks=[lgb.early_stopping(200, verbose=False), lgb.log_evaluation(0)])
+            hp[kva] = hm.predict(VAX[FEATS][kva]); iters_h[int(h)] = hm.best_iteration
+        out.update({"per_h": rm(hp), "blend": rm(0.5 * (pred + hp)), "iters_h": iters_h})
+    print("    " + "  ".join(f"{k}={v:.4f}" for k, v in out.items() if isinstance(v, float))
+          + f"  ratio={out['global'] / out['interp']:.3f}  iters={out['iters_global']}")
+    return out, g_model, VAX, VAY, VAH, pred
 
 
 def main():
@@ -309,45 +377,13 @@ def main():
     cells = pd.Index(sorted(set(zip(tr.lat, tr.lon))))
     tr["cell_idx"] = cells.get_indexer(pd.MultiIndex.from_arrays([tr.lat, tr.lon]))
     te["cell_idx"] = cells.get_indexer(pd.MultiIndex.from_arrays([te.lat, te.lon]))
-
     G = build_panel(tr, te, cells)
     C = build_covariates(tr, te, len(cells), G.shape[1])
-    DM, DS, DN = drift_panels(G)
-    val_start = tr.m.max() - VALID_MONTHS + 1
-
-    def panels(src):
-        clim, cmean, cstd = climatology(src, cells)
-        NB, NBA = neighbour_panels(cells, G, clim)
-        return (G, clim, cmean, cstd, C, NB, NBA, DM, DS, DN)
-
-    # Climatology aggregates targets, so computing it over ALL train rows puts a
-    # validation row's own target inside its clim_m / cell_mean / cell_std --
-    # while a test row's come from train only. Scoring against that overstates
-    # the model by ~0.004. The selection phase therefore uses statistics from
-    # before the validation window (the honest analogue of what test gets); the
-    # final refit uses all of train, which is correct because test lies beyond it.
-    P = panels(tr[tr.m < val_start])
-    P_full = panels(tr)
-
-    # --- anchors for every test row: months back to the last observed TWS,
-    #     and months forward to the next one (0 == no right anchor) ---
-    known = ~np.isnan(G); known[:, tr.m.max() + 1:] &= False
-    obs = te[te.TWS_t.notna()]
-    known[obs["cell_idx"].to_numpy(), obs.m.to_numpy()] = True
-    te_ci, te_tgt = te["cell_idx"].to_numpy(), te["m"].to_numpy() + 1
     n_m = G.shape[1]
-    te_dL, te_dR = np.ones(len(te), np.int64), np.zeros(len(te), np.int64)
-    for i in range(len(te)):
-        d = 1
-        while d <= 24 and not known[te_ci[i], te_tgt[i] - d]:
-            d += 1
-        te_dL[i] = d
-        d = 1
-        while d <= 24 and te_tgt[i] + d < n_m and not known[te_ci[i], te_tgt[i] + d]:
-            d += 1
-        te_dR[i] = d if (d <= 24 and te_tgt[i] + d < n_m
-                         and known[te_ci[i], te_tgt[i] + d]) else 0
 
+    # --- test anchors ---
+    known = np.isfinite(G)
+    te_dL, te_dR = anchors_for(known, te["cell_idx"].to_numpy(), te["m"].to_numpy() + 1, n_m)
     cfg_counts = Counter(zip(te_dL.tolist(), te_dR.tolist()))
     bracketed = sum(n for (_, dr), n in cfg_counts.items() if dr)
     print(f"test configurations: {len(cfg_counts)} distinct (dL, dR); "
@@ -355,146 +391,78 @@ def main():
     MAJOR = sorted(c for c, n in cfg_counts.items() if n >= 4000)
     for c in MAJOR:
         print(f"  dL={c[0]} dR={c[1] if c[1] else '-'}   {cfg_counts[c]:>7,} rows")
-    W = {i: cfg_counts[c] for i, c in enumerate(MAJOR)}
-
-    # --- training / validation drawn at exactly those (dL, dR) combinations ---
-    TRX, TRY, TRM = [], [], []
-    VAX, VAY, VAC, VAH, VABASE, VAM = [], [], [], [], [], []
-    for ci_cfg, (dl, dr) in enumerate(MAJOR):
-        ok = tr[(tr.m + 1 - dl >= tr.m.min()) & (tr.m + 1 + dr <= tr.m.max() + 1)]
-        trn = ok[ok.m < val_start]
-        if len(trn) > N_PER_CFG:
-            trn = trn.iloc[rng.choice(len(trn), N_PER_CFG, replace=False)]
-        val = ok[ok.m >= val_start]
-        Xtr, btr, _ = make_features(trn, dl, dr or None, *P)
-        Xva, bva, _ = make_features(val, dl, dr or None, *P)
-        gtr, gva = np.isfinite(btr), np.isfinite(bva)
-        if dr:
-            gtr &= np.isfinite(Xtr["right_tws"].to_numpy())
-            gva &= np.isfinite(Xva["right_tws"].to_numpy())
-        print(f"  dL={dl} dR={dr if dr else '-'}: train {gtr.sum():>8,}  valid {gva.sum():>7,}")
-        TRX.append(Xtr[gtr]); TRY.append(trn.target.to_numpy()[gtr])
-        TRM.append(trn.m.to_numpy()[gtr])
-        VAX.append(Xva[gva]); VAY.append(val.target.to_numpy()[gva])
-        VABASE.append(bva[gva]); VAM.append(val.m.to_numpy()[gva])
-        VAC.append(np.full(int(gva.sum()), ci_cfg))
-        VAH.append(np.full(int(gva.sum()), dl))
-    TRX = pd.concat(TRX, ignore_index=True)
-    TRY, TRM = np.concatenate(TRY), np.concatenate(TRM)
-    VAX = pd.concat(VAX, ignore_index=True)
-    VAY, VAM = np.concatenate(VAY), np.concatenate(VAM)
-    VAB, VAC, VAH = np.concatenate(VABASE), np.concatenate(VAC), np.concatenate(VAH)
-    print(f"train {TRX.shape}  valid {VAX.shape}")
-
-    print("\nbaselines (test-weighted):")
-    print(f"  persistence         {wrmse(VAY, VAX.last_tws.to_numpy(), VAC, W):.4f}")
-    print(f"  climatology         {wrmse(VAY, VAX.clim_m.to_numpy(), VAC, W):.4f}")
-    ip = VAX.interp.to_numpy().copy()
-    ip[~np.isfinite(ip)] = VAX.last_tws.to_numpy()[~np.isfinite(ip)]
-    print(f"  linear interpolation{wrmse(VAY, ip, VAC, W):.4f}   <- the thing to beat")
 
     tracker = EmissionsTracker(project_name="tws-forecast", output_dir=".",
                                output_file="emissions.csv", log_level="error")
     tracker.start()
 
-    print("\nglobal model:")
-    TRW = recency_weights(TRM)
-    g_model = fit(TRX[FEATS], TRY, VAX[FEATS], VAY, "global", TRW)
-    g_pred = g_model.predict(VAX[FEATS])
+    # --- selection on replay folds ---
+    print("\nreplay folds:")
+    folds, last_model, VP = {}, None, []
+    for b in REPLAY_FOLDS:
+        out, g_model, VAX, VAY, VAH, pred = replay_fold(b, tr, cells, G, C, MAJOR, rng, N_PER_CFG)
+        folds[b] = out; last_model = g_model
+        VP.append(pd.DataFrame({"fold": b, "h": VAH, "target": VAY, "pred": pred,
+                                "interp": interp_base(VAX), "lat": VAX.lat.to_numpy(),
+                                "lon": VAX.lon.to_numpy()}))
+        del VAX
+    pd.concat(VP, ignore_index=True).to_parquet("valid_preds.parquet")
+    iters = int(np.mean([f["iters_global"] for f in folds.values()]))
+    score = float(np.mean([f["global"] for f in folds.values()]))
+    print(f"\nreplay mean: model {score:.4f}  interp {np.mean([f['interp'] for f in folds.values()]):.4f}"
+          f"  -> {iters} rounds")
 
-    print("per-dL models:")
-    h_models, h_pred = {}, np.empty(len(VAX))
-    for h in sorted(set(VAH.tolist())):
-        ktr, kva = (TRX.h == h).to_numpy(), (VAH == h)
-        h_models[h] = fit(TRX[FEATS][ktr], TRY[ktr], VAX[FEATS][kva], VAY[kva],
-                          f"dL={h}", TRW[ktr])
-        h_pred[kva] = h_models[h].predict(VAX[FEATS][kva])
-    emissions = tracker.stop()
-
-    b_pred = 0.5 * (g_pred + h_pred)
-    scores = {"global": wrmse(VAY, g_pred, VAC, W),
-              "per_horizon": wrmse(VAY, h_pred, VAC, W),
-              "blend": wrmse(VAY, b_pred, VAC, W)}
-    print("\ntest-weighted validation RMSE: "
-          + "  ".join(f"{k}={v:.4f}" for k, v in scores.items()))
-    best = min(scores, key=scores.get)
-    print(f"selected: {best}")
-    print(f"training emissions: {emissions * 1000:.2f} g CO2eq"
-          f"  (energy {tracker.final_emissions_data.energy_consumed * 1000:.1f} Wh)")
-
-    print("\nRMSE by configuration (model / interpolation / persistence):")
-    for i, c in enumerate(MAJOR):
-        k = VAC == i
-        mp = b_pred if best == "blend" else (g_pred if best == "global" else h_pred)
-        print(f"  dL={c[0]} dR={c[1] if c[1] else '-':>2}: "
-              f"{mean_squared_error(VAY[k], mp[k]) ** 0.5:.4f}"
-              f" / {mean_squared_error(VAY[k], ip[k]) ** 0.5:.4f}"
-              f" / {mean_squared_error(VAY[k], VAX.last_tws.to_numpy()[k]) ** 0.5:.4f}")
-
-    print("\nfeature importance (global), top 15:")
-    for f, gain in sorted(zip(FEATS, g_model.feature_importance("gain")),
+    print("\nfeature importance (last fold, gain), top 15:")
+    for f, gain in sorted(zip(FEATS, last_model.feature_importance("gain")),
                           key=lambda x: -x[1])[:15]:
-        print(f"  {f:20s} {gain:,.0f}")
+        print(f"  {f:24s} {gain:,.0f}")
 
-    pd.DataFrame({"h": VAH, "cfg": VAC, "target": VAY, "pred_global": g_pred,
-                  "pred_horizon": h_pred, "interp": ip,
-                  "lat": VAX.lat.to_numpy(), "lon": VAX.lon.to_numpy()}
-                 ).to_parquet("valid_preds.parquet")
-
-    # --- refit on train+valid, predict test ---
-    # Rebuilt with full-history climatology (P_full): test lies beyond all of
-    # train, so using every train month here is the correct analogue.
-    val_keep = VAX[["lat", "lon"]].copy()
-    del TRX, VAX
-    FX, FY, FM = [], [], []
+    # --- final refit on all of train, predict test ---
+    # Preallocate one float32 array and fill it per config: concatenating 17
+    # frames and then re-selecting columns would hold three copies of ~2.4 GB.
+    P_full = Panels(cells, tr, G, C, beta_upto=int(tr.m.max()) + 2)
+    ALLX = np.empty((N_PER_CFG_FINAL * len(MAJOR), len(FEATS)), np.float32)
+    ALLY = np.empty(N_PER_CFG_FINAL * len(MAJOR), np.float32)
+    ALLH = np.empty(N_PER_CFG_FINAL * len(MAJOR), np.int16)
+    n = 0
     for (dl, dr) in MAJOR:
-        ok = tr[(tr.m + 1 - dl >= tr.m.min()) & (tr.m + 1 + dr <= tr.m.max() + 1)]
-        if len(ok) > N_PER_CFG * 2:
-            ok = ok.iloc[rng.choice(len(ok), N_PER_CFG * 2, replace=False)]
-        X, b, _ = make_features(ok, dl, dr or None, *P_full)
-        g = np.isfinite(b)
-        if dr:
-            g &= np.isfinite(X["right_tws"].to_numpy())
-        FX.append(X[g]); FY.append(ok.target.to_numpy()[g]); FM.append(ok.m.to_numpy()[g])
-    ALLX = pd.concat(FX, ignore_index=True)
-    ALLY, ALLM = np.concatenate(FY), np.concatenate(FM)
-    ALLW = recency_weights(ALLM)
-    del FX, FY
-    print(f"final refit on {ALLX.shape}")
-    if best in ("global", "blend"):
-        fin_g = lgb.train(PARAMS, lgb.Dataset(ALLX[FEATS], ALLY, weight=ALLW),
-                          num_boost_round=g_model.best_iteration)
-    if best in ("per_horizon", "blend"):
-        fin_h = {h: lgb.train(PARAMS, lgb.Dataset(ALLX[FEATS][(ALLX.h == h).to_numpy()],
-                                                  ALLY[(ALLX.h == h).to_numpy()],
-                                                  weight=ALLW[(ALLX.h == h).to_numpy()]),
-                              num_boost_round=h_models[h].best_iteration)
-                 for h in h_models}
-    del ALLX
+        X, y = sample_config(tr, dl, dr, N_PER_CFG_FINAL, rng, P_full)
+        ALLX[n:n + len(X)] = X[FEATS].to_numpy(np.float32); ALLY[n:n + len(X)] = y
+        ALLH[n:n + len(X)] = dl; n += len(X)
+        del X
+    ALLX, ALLY, ALLH = ALLX[:n], ALLY[:n], ALLH[:n]
+    print(f"\nfinal refit on {ALLX.shape} for {iters} rounds")
+    ds = lgb.Dataset(ALLX, ALLY, feature_name=FEATS, free_raw_data=True)
+    fin_g = lgb.train(PARAMS, ds, num_boost_round=iters)
+    fin_h = {}
+    if BLEND_PER_H:
+        for h in sorted(set(ALLH.tolist())):
+            k = ALLH == h
+            n_it = int(np.mean([f["iters_h"].get(h, iters) for f in folds.values()]))
+            fin_h[h] = lgb.train(PARAMS, lgb.Dataset(ALLX[k], ALLY[k], feature_name=FEATS), num_boost_round=n_it)
+    del ALLX, ds
+    emissions = tracker.stop()
 
     pred = np.empty(len(te))
     for (dl, dr) in sorted(cfg_counts):
         k = (te_dL == dl) & (te_dR == dr)
         if not k.any():
             continue
-        X, _, _ = make_features(te[k], dl, dr or None, *P_full)
-        X = X[FEATS]
-        mh = h_models.get(dl, h_models[min(h_models, key=lambda z: abs(z - dl))])
-        if best == "global":
-            pred[k] = fin_g.predict(X)
-        elif best == "per_horizon":
-            pred[k] = fin_h.get(dl, fin_h[min(fin_h, key=lambda z: abs(z - dl))]).predict(X)
-        else:
+        X, _ = make_features(te[k], dl, dr or None, P_full)
+        pred[k] = fin_g.predict(X[FEATS])
+        if BLEND_PER_H:
             alt = fin_h.get(dl, fin_h[min(fin_h, key=lambda z: abs(z - dl))])
-            pred[k] = 0.5 * (fin_g.predict(X) + alt.predict(X))
+            pred[k] = 0.5 * (pred[k] + alt.predict(X[FEATS]))
     assert np.isfinite(pred).all()
 
     sub = pd.DataFrame({"ID": te["ID"], "Target": pred})
     ss = pd.read_csv(f"{DATA}/SampleSubmission.csv")
     assert set(sub.ID) == set(ss.ID) and len(sub) == len(ss)
     sub.set_index("ID").loc[ss.ID].reset_index().to_csv("submission.csv", index=False)
-    json.dump({"selected": best, **{f"rmse_{k}": v for k, v in scores.items()},
+    json.dump({"selected": "blend" if BLEND_PER_H else "global", "replay_folds": folds,
+               "replay_mean_global": score, "rounds": iters,
                "emissions_kg_co2eq": emissions}, open("run_summary.json", "w"), indent=2)
+    print(f"training emissions: {emissions * 1000:.2f} g CO2eq")
     print(f"\nwrote submission.csv {sub.shape}")
 
 

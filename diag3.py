@@ -6,7 +6,7 @@ for the long one, so the same sweep is repeated with a 12-month buffer inserted
 between train and validation, which mimics the longer lead we are scored at.
 """
 import numpy as np, pandas as pd, lightgbm as lgb
-import model as M
+import model_v6_reference as M   # written against the v6 feature API
 from diag import drift_panels, DRIFT_FEATS, N_PER_H
 
 FE = M.FEATS + DRIFT_FEATS

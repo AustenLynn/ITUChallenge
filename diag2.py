@@ -4,7 +4,7 @@ A hard cutoff throws away rows; exponential recency weights keep every row but
 lean on recent ones. Both are swept here against the same validation set.
 """
 import numpy as np, pandas as pd, lightgbm as lgb
-import model as M
+import model_v6_reference as M   # written against the v6 feature API
 from diag import drift_panels, DRIFT_FEATS, N_PER_H
 
 SEED = 0

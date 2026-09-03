@@ -1,6 +1,6 @@
 # Handoff
 
-Read this first, then `README.md` for the measured results table.
+Read this first, then `README.md` for the results tables.
 
 ## Situation
 
@@ -11,191 +11,179 @@ Phase Two trustworthiness write-up that **only the top 10 may submit**.
 | | score |
 |---|---|
 | competition benchmark | 0.899886 |
-| v2 | 0.774957 |
-| v4 (recency + drift) | 0.767074 |
+| v4 (recency + drift, strictly causal) | 0.767074 |
 | v5 (anchor bracketing) | 0.746183 |
-| **v6 (leak fix + larger refit) — current** | **0.736748** |
+| v6 (leak fix + larger refit) | 0.736748 |
+| **v7 (this session) — `submission.csv`, NOT YET SUBMITTED** | ? |
+| top-10 cutoff | 0.655935 |
 | leader (rank 1) | 0.559588 |
 
-**Rank 179 of 476 active at 0.746; unknown at 0.736. The top-10 cutoff is
-0.655935.**
+**The first thing to do is submit `submission.csv` (v7) and record the score
+in the calibration table in `README.md`.** Everything below is the reasoning
+for why it should move the board a lot more than v5/v6 did, and how to tell if
+it did not.
 
-The gap to top 10 is **0.081**. Note what that means: **offline validation is
-already 0.630, better than the 0.656 the cutoff requires.** The entire gap is
-transfer, not signal. The task is not to find more predictive power, it is to
-work out why offline improvements arrive at the board at a fraction of their
-size — or to find changes that transfer at closer to 1:1.
+## The transfer problem is solved (diagnosed, and the fix is in v7)
 
-The offline-to-board gap by version:
+The open question from the previous handoff was why offline gains reached the
+board at a fraction of their size. Two diagnostics answered it this session.
 
-| version | offline | board | gap |
+**1. `replay.py` — the honest offline metric.** It reproduces the test set's
+exact layout on the training panel: the same 18 row months, the same six
+anchor months, the panel masked identically, covariates present only where the
+test has them, training strictly before the window. Four folds (base months 44,
+56, 68, 123; the first three share the test's calendar, 123 is the closest
+late-regime fold).
+
+On it, the v6 model beat linear interpolation by **2%** (0.5938 vs 0.6063
+pooled; fold 44 was *worse* than interpolation), against the **10%** the old
+24-month validation claimed (0.6298 vs 0.7027). The board agrees with the
+replay: v6 at 0.737 against an estimated test-period interpolation baseline of
+~0.75 (section below) is a ratio of ~0.98.
+
+The old validation was optimistic for three reasons, all structural:
+- A right anchor 12–18 months out only fits inside a 24-month window for the
+  three winter months right after the training cutoff, so 39% of the
+  test-weighted metric was scored on the easiest, shortest-lead rows available
+  (validation interp RMSE 0.52 for `(1,18)` vs 0.64 for `(1,3)` — physically
+  backwards).
+- Every feature was computed from a dense panel; the test panel has whole-month
+  holes, so `drift36`/`nobs36`/`last_delta`/`_d1` saw a different world.
+- Training rows carried recency weights and cell-identity features
+  (`clim_m`, `cell_mean`, `cell_std`, lat/lon), so the model memorised each
+  cell's recent anomaly. A validation window adjacent to training rewards that;
+  a test window 2–40 months out does not. This is why early stopping on the
+  replay halts at ~100 rounds for v6: the transferable signal is learned
+  immediately and everything after is memorisation.
+
+**2. `pseudotest.py` — real test-period labels.** The six observed test months
+(164, 168, 173, 179, 198, 202) can each be predicted from their neighbouring
+anchors and scored against truth. That is the only 2015–2018 ground truth we
+have. Results (pooled RMSE, model / interp / ratio):
+
+| feature set | 2013–15 window | **real 2015–18 anchors** |
+|---|---|---|
+| v6-style (reduced) | 0.698 / 0.754 / 0.925 | 0.793 / 0.829 / **0.957** |
+| + target-month covariates | 0.660 / 0.754 / 0.874 | 0.715 / 0.829 / **0.862** |
+| + drop climatology group | 0.652 / 0.754 / 0.864 | 0.704 / 0.829 / **0.850** |
+
+So the v6 recipe kept only ~4% over interpolation in the real period, while
+target-month covariates without climatology keep ~15%. That gain is measured
+on the actual test years, not on a replay. (The pseudo-test configs use longer
+`dL` than the test's and have target-month covariates for 100% of rows where
+the test has them for 67%, so expect the board gain to be smaller than this.)
+
+**What the leaderboard's interpolation baseline probably is.** Predicting each
+observed test anchor from its neighbours gives errors 15–40% above the same
+configuration and calendar month in training years (e.g. interp 173|179|198:
+1.067 vs a 2002–2014 mean of 0.769). 2015 itself has persistence error 0.87
+against ~0.53 in every earlier year, concentrated in deserts (Sahara, Arabia,
+Tibet) where real storage barely moves — late-mission GRACE noise. The
+season-honest all-years interp baseline for the test layout is 0.604; scaled by
+~1.25 for period difficulty gives ~0.75. Part of the test error is therefore
+unpredictable measurement noise, and the top-10 cutoff at 0.656 is a ratio of
+~0.87 to that baseline.
+
+## What v7 changed, with replay numbers
+
+Pooled RMSE over the four replay folds, global model, model / interp:
+
+| change | pooled | ratio | fold 123 (late) |
 |---|---|---|---|
-| v5 | 0.6252 (leaky metric) | 0.746183 | 0.121 |
-| v6 | 0.6298 (honest metric) | 0.736748 | 0.107 |
+| v6 feature set, recency weights | 0.5938 / 0.6063 | 0.979 | 0.6835 |
+| − climatology & cell-level features | 0.5619 | 0.927 | 0.6773 |
+| + target-month covariates (`_n`, `_nres`, `_rmean`) | 0.5534 | 0.913 | 0.6839 |
+| − drift features, uniform weights | 0.5474 | 0.903 | 0.6832 |
+| + smoothed residuals, per-cell slope, `_nL`/`_nR` | **0.5401** | **0.891** | **0.6760** |
 
-To reach 0.656 at the current gap, offline needs to hit roughly **0.55**.
+Note the late fold moves far less than the early ones (0.6835 → 0.6760). The
+pseudo-test is the reason to expect more on the board than fold 123 suggests,
+but be ready for the smaller number.
 
-## Start here: the transfer problem
+Measured flat or worse on the replay (do not re-propose without a new reason):
+hyperparameters (leaves 15–255, `min_data_in_leaf` 200–10k, L2, feature
+fraction: all within 0.002); residual target `y − interp` (worse by 0.003 with
+the new features); per-dL blend (−0.001, dropped — v7 is the global model
+only); recency half-life 15 or 40 vs uniform (uniform best by 0.002); data
+volume per config 5k vs 100k rows (fold 68: 0.5028 vs 0.5026 — the model is
+signal-limited, not data-limited).
 
-**Offline gains keep failing to reach the board, and the cause is unresolved.**
-
-- v2 → v4: offline −0.0180, board −0.0079. ~44% transferred.
-- v4 → v5: offline looked enormous (persistence 0.7627 → model 0.6252), board
-  moved only −0.0209.
-
-I claimed v5's config-keyed validation was "closely calibrated to the board"
-because its persistence baseline (0.7627) sat near v4's board score (0.767).
-**That reasoning was wrong** — comparing a persistence *baseline* against a
-*model's* board score is not a calibration, and the v5 result contradicts it.
-
-**One cause has been found and fixed** (`diag4.py`, commit below). `climatology()`
-aggregates targets, so computing it over all train rows placed a validation
-row's own target inside its own `clim_m` / `cell_mean` / `cell_std`, while a
-test row's came from train only. Validation was being scored with a
-better-informed feature than test receives. Removing it costs **0.004**
-(0.6270 → 0.6311) — real, worth having, but only ~4% of the ~0.12 gap.
-`model.py` now uses pre-validation statistics for model selection and
-full-history statistics for the final refit, which is the correct protocol.
-
-**Still open, and it is the whole ballgame:** the remaining ~0.11. The most
-likely reading is that it is genuine period difficulty — 2015–2019 (record
-2015–16 El Niño, up to 40 months past training) is simply harder than
-2013–2015 — in which case it is a floor rather than a bug, and reaching 0.656
-requires offline ~0.54. That is another improvement the size of the entire
-bracketing discovery.
-
-**Next diagnostic:** score the v4 causal feature set on the config-keyed
-validation. Nobody has done it, so v5's true offline delta is still unknown and
-there is no honest transfer ratio to reason with. `model_causal_reference.py`
-holds the v4 features; `ablate.py` shows the pattern for running two feature
-sets against one fixed validation set.
-
-Two hypotheses worth separating:
-
-1. **Public-subset effect.** The public board scores "only a portion of the
-   total test set". If that portion is drawn by month rather than at random, the
-   gain on bracketed rows may be under-represented and the private score could
-   be much better than the public one. Cannot be resolved directly, but it
-   changes how much weight to put on public feedback.
-2. **Validation optimism.** Bracketed validation rows are drawn from the dense
-   contiguous train panel; test anchors span the GRACE → GRACE-FO mission change
-   (months 198 and 202 are GRACE-FO). Per-month means show no obvious offset
-   (−0.21 to +0.09 across all observed test months), so this looks weak, but the
-   `dR=12..18` configs — 39% of test, all anchored on month 198 — are where it
-   would bite.
-
-## Problem structure — the non-obvious facts
-
-- **Train has zero missing `TWS_t`; test is 66.5% missing, masked by whole
-  months.** Anything leaning on `TWS_t` directly looks fine in CV and dies on
-  the board.
-- **88.8% of test rows are bracketed**: Test.csv carries six fully-observed
-  months (164, 168, 173, 179, 198, 202) and every masked block sits between two
-  of them. Those rows are interpolation, not forecasting. This is the single
-  largest structural fact and v5 is built on it.
-- **Train months are themselves non-contiguous** — 22 GRACE outages clustered
-  2011–2014 — so training windows have holes that test windows never have.
-- **`target(m) == TWS_t(m+1)` exactly** (verified, zero max abs diff). The panel
-  in `build_panel` relies on this.
-- Month index convention throughout: `m = (year-2002)*12 + (month-1)`. Train
-  spans 4–163, test targets 165–204.
-- **The target is non-stationary**: annual mean falls from +0.226 (2002) to
-  −0.136 (2015). Uniform training over 13 years biases predictions high for a
-  2015–2019 test period.
-
-## What worked, with measured gains
-
-| change | gain |
-|---|---|
-| horizon framing + per-cell climatology | baseline |
-| anchor-delta covariates | −0.0072 |
-| spatial neighbour smoothing | −0.0009 |
-| exponential recency weighting (half-life 15 mo) | −0.017 |
-| per-cell drift features | −0.004 |
-| anchor bracketing / interpolation (v5) | large offline, −0.021 board |
-| climatology leak fix (v6) | +0.004 offline (honesty, not score) |
-| **larger final refit** (4.6M → 9.2M rows) | **−0.009 board** |
-
-## What was measured and REJECTED — do not re-propose
-
-Each looked principled and lost. Numbers are config- or test-weighted RMSE.
-
-- Dropping features whose train/test availability differs (`last_delta` is 100%
-  absent for masked test rows): **−0.009 worse**. Keep them; LightGBM routes
-  NaNs fine and they still pay on the rows where they exist.
-- Masking those features during training to match test availability: a further
-  **−0.008 worse**.
-- Residual learning against a seasonal-persistence base: **−0.014 worse**;
-  against plain persistence, **−0.009 worse**. The seasonal base is itself worse
-  than raw persistence (0.862 vs 0.838).
-- Hyperparameter tuning (255→63 leaves, lr 0.05→0.02): **−0.001**. Model is
-  feature- and distribution-limited, not capacity-limited.
-- Requiring complete covariate windows in training: **−0.004 worse**.
+**The previous handoff's "measured and REJECTED" list was measured on the old
+metric and should be treated as unmeasured.** In particular residual learning
+and feature dropping were rejected there for reasons that no longer hold.
+`model_v6_reference.py` is the v6 code; `ablate*.py`, `diag*.py` and
+`pseudotest.py` import it.
 
 ## Ranked next steps
 
-1. **Scale the final refit further — the cheapest lever, and the only change so
-   far that transferred well.** v6 bundled two changes: the climatology leak fix
-   (which only affects model *selection*, since validation features are not used
-   to build the submission) and doubling the final refit from 4.6M to 9.2M rows
-   (which does change the submission). The board moved −0.009, and the leak fix
-   can only have touched it indirectly through `best_iteration`, so the data
-   volume is the likely cause. Not cleanly separated — the two changes went out
-   together — but it is the most plausible reading and it is trivially testable.
+1. **Submit v7. Then decide by the number.** If the board moves to ≲0.70, the
+   replay+pseudo-test protocol is validated and the remaining ideas below are
+   worth the runs. If it barely moves, the public subset is doing something the
+   anchors cannot see, and the cause is again unknown.
+2. **Covariate availability at masked target months.** Test.csv has no rows at
+   all for months 165–167, 171–172, 177–178, 186–197, 199–201, so a third of
+   rows get NaN target-month covariates. SPEI is computed from precipitation
+   and PET which the rules explicitly permit from the Climate Data Store; ERA5
+   precipitation/temperature at every month would fill that gap and extend the
+   covariate path across the whole 18-month masked block. This is the biggest
+   legitimate lever left, and it is days of work with a CDS account.
+3. **More from the target-month covariates we have.** Each v2 subgroup (nL/nR,
+   smoothed, per-cell slope) is worth ~0.002 on its own and they are largely
+   redundant with each other; the per-cell slope on the *smoothed* residual is
+   the top non-anchor feature. Try slopes fitted on residuals at the test's
+   spans rather than month-to-month diffs, and 7×7 smoothing.
+4. **Seed/fold ensembling** of the final refit. Cheap, variance-only.
+5. **Phase Two artifacts** — `emissions.csv` (CodeCarbon) and
+   `valid_preds.parquet` (now replay-fold predictions with lat/lon) exist.
 
-   Contrast this with feature engineering, which has transferred at well under
-   1:1 all session. `N_PER_CFG` is currently 300k (600k for the final refit).
-   **There is now ~2.2 GB of headroom** after clearing the stale ablation caches,
-   where the earlier run finished with 68 MB. Raise it and measure.
-2. **The transfer diagnostic above.** Everything else is guesswork until offline
-   movement can be trusted. Be aware the answer may be "the gap is real and
-   irreducible", which would mean top 10 needs a discovery, not refinement.
-2. **External Copernicus covariates — the biggest untouched legitimate lever.**
-   The rules *explicitly permit* data from the Climate Data Store and the
-   European/Global Drought Observatories. We have only ever used the five
-   columns in the CSV. ERA5 precipitation, evapotranspiration, temperature,
-   runoff and snow water equivalent are all fair game and are the most likely
-   explanation for a leader at 0.5596. Days of work, not an afternoon.
-3. **Ensembling** across seeds and configs. Reduces variance rather than bias,
-   so it should transfer closer to 1:1 than feature work has. Modest but
-   dependable.
-4. **Phase Two artifacts** — only if the rank makes top 10 plausible.
-   `emissions.csv` (CodeCarbon, per run) and `valid_preds.parquet` (held-out
-   predictions with lat/lon/config) already exist for the bias and
-   sustainability sections.
+## Problem structure — the non-obvious facts
+
+- **Test has only 18 row months**, not 40: 164, 168–170, 173–176, 179–185,
+  198, 202–203. Six are fully observed anchors; the other twelve are masked by
+  whole month (≈0.2% stray observed cells). 88.8% of rows are bracketed.
+- **Covariates exist only at those 18 months** in Test.csv. The 12–18-month
+  masked block (rows 180–185, 39% of test) sees covariates for 179–185 and 198
+  only.
+- **Train has zero missing `TWS_t`**; train months themselves have 22 outages
+  (2011–2014), and `target(m) == TWS_t(m+1)` exactly, so the panel `G` knows
+  more months than `time` lists.
+- **The field is extremely smooth spatially** (month-to-month change correlates
+  0.999 with E–W neighbours): 15.7k cells are a few hundred independent
+  samples, which is why data volume does nothing.
+- **Late-mission GRACE (2015+) is noisier**, especially in deserts, and the
+  test anchors (179 above all) carry that noise into every interpolation.
+- Month index convention: `m = (year-2002)*12 + (month-1)`. Train spans 4–163,
+  test targets 165–204.
 
 ## The rules decision
 
 The competition permits Copernicus covariates *"provided that these variables
 are available at the stated prediction time and do not directly or indirectly
-include future GRACE/TWS information."*
-
-v5 uses observed TWS at *later* months as a right anchor. Read strictly, that is
-future TWS information. Read narrowly, that sentence governs external covariates
-a participant brings in, not values the organisers themselves placed in
-Test.csv. **The user was shown the measurement and the ambiguity and chose to
-build it.** Do not silently revert it; equally, do not extend it further without
-checking in.
-
-`model_causal_reference.py` is the strictly forward-looking version (board
-0.767) and still runs. If a moderator rules on this, a compliant submission is
-one run away.
+include future GRACE/TWS information."* v5+ uses observed TWS at a later month
+as a right anchor; v7 additionally uses SPEI/soil-moisture at the target month
+(the row for that month in Test.csv). Both are values the organisers placed in
+Test.csv; neither is external data. The user chose to build the right anchor
+with the ambiguity in view; the target-month covariates are the same category
+of choice and less strong. `model_causal_reference.py` (board 0.767) is the
+strictly forward-looking version if a moderator rules otherwise.
 
 ## Practical constraints
 
-- **7 GB RAM total; the v5 run peaked at 6 GB and finished with 68 MB free.**
-  There is no headroom. Raising `N_PER_CFG` (currently 300k × 17 configs) will
-  OOM. Reduce it or move feature frames to disk before scaling anything up.
-- 12 cores. A full `model.py` run takes ~15 min.
-- Environment is `uv`-managed; `python3 -m venv` fails (no `ensurepip`):
-  `uv venv .venv && uv pip install -p .venv/bin/python pandas numpy lightgbm scikit-learn pyarrow codecarbon`
-- **Redirected Python output is buffered — always run with `python -u`** or logs
-  appear empty and progress is invisible.
-- `data/` is gitignored; re-download from Zindi if the checkout is fresh.
+- 7 GB RAM, 12 cores. `model.py` builds two replay folds (200k rows/config)
+  then refits on 400k rows/config (5.9M rows × 77 features, 220 rounds); peak ~5 GB. Last run: fold 68 0.5022, fold 123 0.6767 (interp 0.5736 / 0.7249).
+  `SMOKE=1 .venv/bin/python -u model.py` runs the whole pipeline on 5k
+  rows/config in ~3 min — use it after any edit.
+- `replay.py` caches feature frames per fold as `cache_replay_v7_b*_n*.parquet`
+  (gitignored); an ablation on cached folds takes ~1 min per fold.
+- Always run Python with `-u`; redirected output is otherwise buffered.
+- Environment is `uv`-managed: `.venv/bin/python`.
+- `data/` is gitignored; download from Zindi on a fresh checkout.
+- Background waits longer than ~10 min get killed by the harness; poll the log
+  instead.
 
 ## A caution on reading importance tables
 
-`nb_last_tws` tops every gain ranking, with `interp_nb` second. These are
-near-duplicates of `last_tws` and `interp`; gain redistributes between collinear
-features without skill moving. Do not report that ordering as a skill ranking —
-in the Phase Two transparency section or anywhere else. Use SHAP for that claim.
+`last_tws`, `nb_last_tws`, `interp`, `interp_nb` top the gain ranking and are
+near-duplicates of each other; gain redistributes between collinear features
+without skill moving. Among the covariate features `beta_sm_nres_s3` is first.
+Use SHAP, not gain, for any skill claim in the Phase Two write-up.

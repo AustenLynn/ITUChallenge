@@ -15,7 +15,7 @@ Two independent probes against one fixed validation set:
 """
 import numpy as np, pandas as pd, lightgbm as lgb
 from sklearn.metrics import mean_squared_error
-import model as M
+import model_v6_reference as M   # written against the v6 feature API
 
 N_PER_H, SEED = 300_000, 0
 WIN = 36

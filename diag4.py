@@ -12,7 +12,7 @@ measures how much of the offline score was coming from the leak.
 import numpy as np, pandas as pd, lightgbm as lgb
 from collections import Counter
 from sklearn.metrics import mean_squared_error
-import model as M
+import model_v6_reference as M   # written against the v6 feature API
 
 N_PER_CFG = 150_000
 

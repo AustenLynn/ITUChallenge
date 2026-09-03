@@ -1,7 +1,18 @@
 {
-  "selected": "blend",
-  "rmse_global": 0.6312588993418013,
-  "rmse_per_horizon": 0.6326059787656862,
-  "rmse_blend": 0.6298142337925132,
-  "emissions_kg_co2eq": 0.0014333274881429645
+  "selected": "global",
+  "replay_folds": {
+    "68": {
+      "interp": 0.5736275828085399,
+      "global": 0.5022336263485437,
+      "iters_global": 253
+    },
+    "123": {
+      "interp": 0.7248974862494096,
+      "global": 0.6767165241615155,
+      "iters_global": 188
+    }
+  },
+  "replay_mean_global": 0.5894750752550296,
+  "rounds": 220,
+  "emissions_kg_co2eq": 0.0013765917707912517
 }

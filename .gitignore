@@ -13,3 +13,6 @@ valid_preds.parquet
 # Ablation caches (large, regenerable)
 cache_*.parquet
 cache_*.npz
+
+# Run logs
+logs/
