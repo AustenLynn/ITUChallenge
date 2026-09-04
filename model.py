@@ -60,6 +60,9 @@ PARAMS = dict(objective="regression", metric="rmse", learning_rate=0.02,
               verbose=-1, num_threads=-1, seed=SEED)
 N_ROUNDS = 3000
 BLEND_PER_H = False          # replay: per-dL models add nothing over the global one
+HALFLIFE = 24.0              # recency half-life in months on the training target month; 0 = uniform
+LAGS = [4, 5, 6]             # earlier anchors: G[L-k]; the test has k=6 for the 179 block, 5 for 173, 4 for 168/202
+LAG_MASK_P = 0.5             # training rows see each lag feature masked at random so NaN means something
 
 DYN = ["SPEI_01_t", "SPEI_03_t", "SPEI_06_t", "SPEI_12_t", "SOIL_MOISTURE_t"]
 EXTREME = ["SPEI_01_t", "SPEI_03_t", "SOIL_MOISTURE_t"]
@@ -69,7 +72,10 @@ SMOOTHED = ["SOIL_MOISTURE_t", "SPEI_03_t", "SPEI_01_t"]
 BETA_VARS = ["SOIL_MOISTURE_t", "SPEI_03_t"]
 RIGHT_FEATS = ["dR", "span", "w", "right_tws", "right_anom", "right_delta",
                "interp", "nb_right_tws", "interp_nb", "SPEI_06_t_dR",
-               "SOIL_MOISTURE_t_dR"]
+               "SOIL_MOISTURE_t_dR",
+               "nb5_right_tws", "nb7_right_tws", "interp_nb5", "right_minus_nb"]
+LAG_FEATS = [f"lag{k}_delta" for k in LAGS]
+NB_FEATS = ["nb5_last_tws", "nb7_last_tws", "last_minus_nb"]
 NEXT_FEATS = ([f"{c}_n" for c in DYN] + [f"{c}_nres" for c in DYN]
               + [f"{c}_nL" for c in DYN] + [f"{c}_nR" for c in DYN]
               + [f"{c}_rmean" for c in ("SPEI_03_t", "SOIL_MOISTURE_t")]
@@ -79,7 +85,7 @@ FEATS = (["h", "last_tws", "last_anom", "last_delta", "month_sin", "month_cos",
           "nb_last_tws", "nb_last_anom"] + STATIC + DYN
          + [f"{c}_d" for c in DYN] + [f"{c}_gmean" for c in DYN]
          + [f"{c}_gmin" for c in EXTREME] + [f"{c}_gmax" for c in EXTREME]
-         + [f"{c}_d1" for c in LAG1] + RIGHT_FEATS + NEXT_FEATS)
+         + [f"{c}_d1" for c in LAG1] + RIGHT_FEATS + NEXT_FEATS + LAG_FEATS + NB_FEATS)
 
 # test layout, relative to its first month (164)
 OFFS_ROWS = [0, 4, 5, 6, 9, 10, 11, 12, 15, 16, 17, 18, 19, 20, 21, 34, 38, 39]
@@ -194,6 +200,7 @@ class Panels:
         self.G, self.C = G, C
         self.clim = climatology(tr_src, cells)
         self.NB, self.NBA = neighbour_panels(cells, G, self.clim)
+        self.NB5, self.NB7 = smooth_panel(cells, G, 2), smooth_panel(cells, G, 3)
         self.CS = {c: {3: smooth_panel(cells, C[c], 1), 5: smooth_panel(cells, C[c], 2)}
                    for c in SMOOTHED}
         self.BETA = {c: cell_betas(G, C[c], beta_upto) for c in BETA_VARS}
@@ -219,6 +226,14 @@ def make_features(rows, h, dR, P):
     })
     for c in STATIC:
         out[c] = rows[c].to_numpy(np.float32)
+    # Earlier anchors: the trend before L. In the test only one of these exists
+    # per block (k=6 for L=179, 5 for 173, 4 for 168 and 202, none for 198).
+    for k in LAGS:
+        out[f"lag{k}_delta"] = last - G[ci, np.maximum(L - k, 0)]
+    # Wider neighbour means and the local residual: anchor denoising.
+    out["nb5_last_tws"] = P.NB5[ci, L]
+    out["nb7_last_tws"] = P.NB7[ci, L]
+    out["last_minus_nb"] = last - NB[ci, L]
 
     # Covariate path over the gap [L, m]: observed in both train and test.
     win = L[:, None] + np.arange(h)[None, :]
@@ -253,6 +268,10 @@ def make_features(rows, h, dR, P):
         out["interp"] = (1 - w) * last + w * rt
         out["nb_right_tws"] = NB[ci, R]
         out["interp_nb"] = (1 - w) * NB[ci, L] + w * NB[ci, R]
+        out["nb5_right_tws"] = P.NB5[ci, R]
+        out["nb7_right_tws"] = P.NB7[ci, R]
+        out["interp_nb5"] = (1 - w) * P.NB5[ci, L] + w * P.NB5[ci, R]
+        out["right_minus_nb"] = rt - NB[ci, R]
         for c in ("SPEI_06_t", "SOIL_MOISTURE_t"):
             out[f"{c}_dR"] = C[c][ci, R] - rows[c].to_numpy(np.float32)
 
@@ -310,12 +329,30 @@ def anchors_for(known, ci, tgt, n_m):
     return dL, dR
 
 
+def mask_lags(X, rng):
+    """Training rows come from a dense panel where every lag exists; test rows
+    have at most one. Mask each lag feature at random so the model learns
+    what its absence means instead of an arbitrary default direction."""
+    for f in LAG_FEATS:
+        X.loc[rng.random(len(X)) < LAG_MASK_P, f] = np.nan
+    return X
+
+
+def recency_weights(target_months, halflife=None):
+    hl = HALFLIFE if halflife is None else halflife
+    tm = np.asarray(target_months, dtype=np.float64)
+    return 0.5 ** ((tm.max() - tm) / hl) if hl > 0 else np.ones(len(tm))
+
+
 def sample_config(src, dl, dr, n, rng, P):
+    """Training rows for one (dL, dR) configuration: features, target, and the
+    target month (for recency weights)."""
     ok = src[src.m + 1 - dl >= src.m.min()]
     if len(ok) > n:
         ok = ok.iloc[rng.choice(len(ok), n, replace=False)]
     X, g = make_features(ok, dl, dr or None, P)
-    return X[g], ok.target.to_numpy()[g]
+    X = mask_lags(X[g].reset_index(drop=True), rng)
+    return X, ok.target.to_numpy()[g], ok.m.to_numpy()[g] + 1
 
 
 def replay_fold(b, tr, cells, G_full, C_full, cfgs, rng, n_per_cfg):
@@ -337,22 +374,23 @@ def replay_fold(b, tr, cells, G_full, C_full, cfgs, rng, n_per_cfg):
     rep = tr[tr.m.isin([b + o for o in OFFS_ROWS])]
     rep = rep[np.isfinite(G_full[rep["cell_idx"].to_numpy(), rep.m.to_numpy() + 1])]
     rdL, rdR = anchors_for(np.isfinite(G), rep["cell_idx"].to_numpy(), rep.m.to_numpy() + 1, n_m)
-    TRX, TRY, VAX, VAY, VAH = [], [], [], [], []
+    TRX, TRY, TRM, VAX, VAY, VAH = [], [], [], [], [], []
     for (dl, dr) in cfgs:
         k = (rdL == dl) & (rdR == dr)
         if not k.any():
             continue
-        X, y = sample_config(src, dl, dr, n_per_cfg, rng, P)
-        TRX.append(X); TRY.append(y)
+        X, y, tm = sample_config(src, dl, dr, n_per_cfg, rng, P)
+        TRX.append(X); TRY.append(y); TRM.append(tm)
         X, g = make_features(rep[k], dl, dr or None, P)
         VAX.append(X[g]); VAY.append(rep[k].target.to_numpy()[g]); VAH.append(np.full(int(g.sum()), dl))
     TRX = pd.concat(TRX, ignore_index=True); TRY = np.concatenate(TRY)
+    W = recency_weights(np.concatenate(TRM))
     VAX = pd.concat(VAX, ignore_index=True); VAY = np.concatenate(VAY); VAH = np.concatenate(VAH)
     rm = lambda p: float(np.sqrt(np.mean((VAY - p) ** 2)))
     ip = interp_base(VAX)
     print(f"  fold b={b}: train {TRX.shape}  replay {VAX.shape}  "
           f"persistence {rm(VAX['last_tws'].to_numpy()):.4f}  interp {rm(ip):.4f}")
-    g_model = lgb.train(PARAMS, lgb.Dataset(TRX[FEATS], TRY), num_boost_round=N_ROUNDS,
+    g_model = lgb.train(PARAMS, lgb.Dataset(TRX[FEATS], TRY, weight=W), num_boost_round=N_ROUNDS,
                         valid_sets=[lgb.Dataset(VAX[FEATS], VAY)],
                         callbacks=[lgb.early_stopping(200, verbose=False), lgb.log_evaluation(0)])
     pred = g_model.predict(VAX[FEATS])
@@ -361,7 +399,7 @@ def replay_fold(b, tr, cells, G_full, C_full, cfgs, rng, n_per_cfg):
         hp = np.empty(len(VAX)); iters_h = {}
         for h in np.unique(VAH):
             ktr, kva = (TRX.h == h).to_numpy(), VAH == h
-            hm = lgb.train(PARAMS, lgb.Dataset(TRX[FEATS][ktr], TRY[ktr]), num_boost_round=N_ROUNDS,
+            hm = lgb.train(PARAMS, lgb.Dataset(TRX[FEATS][ktr], TRY[ktr], weight=W[ktr]), num_boost_round=N_ROUNDS,
                            valid_sets=[lgb.Dataset(VAX[FEATS][kva], VAY[kva])],
                            callbacks=[lgb.early_stopping(200, verbose=False), lgb.log_evaluation(0)])
             hp[kva] = hm.predict(VAX[FEATS][kva]); iters_h[int(h)] = hm.best_iteration
@@ -424,22 +462,24 @@ def main():
     ALLX = np.empty((N_PER_CFG_FINAL * len(MAJOR), len(FEATS)), np.float32)
     ALLY = np.empty(N_PER_CFG_FINAL * len(MAJOR), np.float32)
     ALLH = np.empty(N_PER_CFG_FINAL * len(MAJOR), np.int16)
+    ALLM = np.empty(N_PER_CFG_FINAL * len(MAJOR), np.int16)
     n = 0
     for (dl, dr) in MAJOR:
-        X, y = sample_config(tr, dl, dr, N_PER_CFG_FINAL, rng, P_full)
+        X, y, tm = sample_config(tr, dl, dr, N_PER_CFG_FINAL, rng, P_full)
         ALLX[n:n + len(X)] = X[FEATS].to_numpy(np.float32); ALLY[n:n + len(X)] = y
-        ALLH[n:n + len(X)] = dl; n += len(X)
+        ALLH[n:n + len(X)] = dl; ALLM[n:n + len(X)] = tm; n += len(X)
         del X
-    ALLX, ALLY, ALLH = ALLX[:n], ALLY[:n], ALLH[:n]
-    print(f"\nfinal refit on {ALLX.shape} for {iters} rounds")
-    ds = lgb.Dataset(ALLX, ALLY, feature_name=FEATS, free_raw_data=True)
+    ALLX, ALLY, ALLH, ALLM = ALLX[:n], ALLY[:n], ALLH[:n], ALLM[:n]
+    W = recency_weights(ALLM)
+    print(f"\nfinal refit on {ALLX.shape} for {iters} rounds, half-life {HALFLIFE}")
+    ds = lgb.Dataset(ALLX, ALLY, weight=W, feature_name=FEATS, free_raw_data=True)
     fin_g = lgb.train(PARAMS, ds, num_boost_round=iters)
     fin_h = {}
     if BLEND_PER_H:
         for h in sorted(set(ALLH.tolist())):
             k = ALLH == h
             n_it = int(np.mean([f["iters_h"].get(h, iters) for f in folds.values()]))
-            fin_h[h] = lgb.train(PARAMS, lgb.Dataset(ALLX[k], ALLY[k], feature_name=FEATS), num_boost_round=n_it)
+            fin_h[h] = lgb.train(PARAMS, lgb.Dataset(ALLX[k], ALLY[k], weight=W[k], feature_name=FEATS), num_boost_round=n_it)
     del ALLX, ds
     emissions = tracker.stop()
 

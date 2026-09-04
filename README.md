@@ -81,6 +81,13 @@ The late check's gain is largest on targets whose anchor is a junk month
 the striping. The v6 → v7 changes, worth 9% pooled on the replay, were worth
 1% on fold 123 and 0% on the board (below).
 
+v8 (`model.py` now) adds a 24-month recency half-life, lag-4/5/6 anchor
+deltas (masked at random in training so their absence is a learned state)
+and 5×5 / 7×7 neighbour means with the local residual. Same checks, model /
+ratio: late check 0.6996 / 0.891, fold 123 0.6748 / 0.931, pseudo-test
+0.6818 / 0.822 — better or equal everywhere; the ablation table is in
+`HANDOFF.md`.
+
 Measured flat or worse on the replay (strong regime, so re-measure on the
 late checks before trusting): hyperparameters (leaves 15–255,
 `min_data_in_leaf` 200–10k, L2, feature fraction — all within 0.002),
@@ -135,7 +142,8 @@ per config (5k vs 100k: identical — the field is spatially smooth enough that
 | v4 (recency weighting + drift)  | 0.6812 (24-mo window) | 0.767074 | 6a20efd |
 | v5 (anchor bracketing)          | 0.6252 (24-mo, leaky) | 0.746183 | 0ca1f88 |
 | v6 (leak fix + 9.2M-row refit)  | 0.6298 (24-mo) / 0.5938 replay | 0.736748 | 3efff00 |
-| v7 (transferable features, replay selection) | 0.5401 replay / 0.7111 late check | **0.738568** | this commit |
+| v7 (transferable features, replay selection) | 0.5401 replay / 0.7111 late check | **0.738568** | a82c06c |
+| v8 (half-life 24, lag anchors, 5×5/7×7 means) | 0.6996 late check / 0.6748 fold 123 / 0.6818 pseudo-test | *not yet submitted* (`submission_v8.csv`) | |
 | `submission_interp.csv` (linear interpolation) | 0.7848 late check / 0.7249 fold 123 | 0.802237 | 872df0d |
 | `submission_hybrid_long.csv` (v7 where dR ≥ 12 or dR = 0, interp elsewhere) | | 0.753301 | 872df0d |
 | `submission_seasonal.csv` (climatology-anchored interpolation) | worse than linear offline | *not submitted* | |

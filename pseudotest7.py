@@ -69,7 +69,7 @@ def main():
         if len(ok) > a.n:
             ok = ok.iloc[rng.choice(len(ok), a.n, replace=False)]
         X, g = M.make_features(ok, dl, dr or None, P)
-        TRX.append(X[g][feats]); TRY.append(ok.target.to_numpy()[g]); TRM.append(ok.m.to_numpy()[g] + 1)
+        TRX.append(M.mask_lags(X[g].reset_index(drop=True), rng)[feats]); TRY.append(ok.target.to_numpy()[g]); TRM.append(ok.m.to_numpy()[g] + 1)
     TRX = pd.concat(TRX, ignore_index=True); TRY = np.concatenate(TRY); TRM = np.concatenate(TRM)
     W = 0.5 ** ((TRM.max() - TRM) / a.halflife) if a.halflife > 0 else None
     print(f"train {TRX.shape}  target months {TRM.min()}..{TRM.max()}")

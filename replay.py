@@ -59,6 +59,8 @@ GROUPS = {
     "nLR": [f"{c}_nL" for c in M.DYN] + [f"{c}_nR" for c in M.DYN],
     "smooth": [f"{c}_nres_s3" for c in M.SMOOTHED] + [f"{c}_nres_s5" for c in M.SMOOTHED],
     "beta": ["beta_sm", "beta_sm_nres", "beta_sm_nres_s3", "beta_spei3", "beta_spei3_nres"],
+    "lag": list(M.LAG_FEATS),
+    "nb57": list(M.NB_FEATS) + ["nb5_right_tws", "nb7_right_tws", "interp_nb5", "right_minus_nb"],
 }
 
 
@@ -88,7 +90,7 @@ def build_fold(b, tr, cells, G_full, C_full, cfgs, n_per_cfg, rng):
         if len(ok) > n_per_cfg:
             ok = ok.iloc[rng.choice(len(ok), n_per_cfg, replace=False)]
         X, g = M.make_features(ok, dl, dr or None, P)
-        TRX.append(X[g]); TRY.append(ok.target.to_numpy()[g]); TRM.append(ok.m.to_numpy()[g])
+        TRX.append(M.mask_lags(X[g].reset_index(drop=True), rng)); TRY.append(ok.target.to_numpy()[g]); TRM.append(ok.m.to_numpy()[g])
         k = (rdL == dl) & (rdR == dr)
         X, g = M.make_features(rep[k], dl, dr or None, P)
         VAX.append(X[g]); VAY.append(rep[k].target.to_numpy()[g])
@@ -162,7 +164,7 @@ def main():
     tot_m = tot_i = 0.0; tot_n = 0; res = []
     ctx = None
     for b in [int(x) for x in a.folds.split(",")]:
-        cache = f"cache_replay_v7_b{b}_n{a.n}"
+        cache = f"cache_replay_v8_b{b}_n{a.n}"
         if os.path.exists(cache + "_tr.parquet"):
             TRX, VAX = pd.read_parquet(cache + "_tr.parquet"), pd.read_parquet(cache + "_va.parquet")
             print(f"fold b={b}: loaded cache  train {TRX.shape}  replay {VAX.shape}")

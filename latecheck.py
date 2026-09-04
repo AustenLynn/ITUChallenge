@@ -62,7 +62,7 @@ def build(cut, n_per_cfg, rng):
         if len(ok) > n_per_cfg:
             ok = ok.iloc[rng.choice(len(ok), n_per_cfg, replace=False)]
         X, g = M.make_features(ok, dl, dr or None, P_tr)
-        TRX.append(X[g]); TRY.append(ok.target.to_numpy()[g]); TRM.append(ok.m.to_numpy()[g] + 1)
+        TRX.append(M.mask_lags(X[g].reset_index(drop=True), rng)); TRY.append(ok.target.to_numpy()[g]); TRM.append(ok.m.to_numpy()[g] + 1)
     TRX = pd.concat(TRX, ignore_index=True)
     TRX["_y"], TRX["_m"] = np.concatenate(TRY), np.concatenate(TRM)   # _m = target month
     del P_tr
@@ -108,7 +108,7 @@ def main():
     ap.add_argument("--halflife", type=float, default=0.0)
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args()
-    cache = f"cache_late_c{a.cut}_n{a.n}"
+    cache = f"cache_late_v8_c{a.cut}_n{a.n}"
     if os.path.exists(cache + "_tr.parquet"):
         TRX, VAX = pd.read_parquet(cache + "_tr.parquet"), pd.read_parquet(cache + "_va.parquet")
     else:

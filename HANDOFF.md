@@ -99,24 +99,47 @@ spans** — v7 had dropped recency weighting because the pooled replay
 (early folds) said uniform was best by 0.002; that was the early-fold
 artefact again. The junk months in training are harmless.
 
+### v8 (this session's second half): half-life 24 + lag anchors + wide neighbour means
+
+New in `model.py`: `lag4/5/6_delta` (TWS at L minus TWS at L−k; the test
+has k=6 for the 179 block, 5 for 173, 4 for 168 and 202 — training rows
+have every lag masked at random with p=0.5 so NaN is a learned state),
+`nb5_/nb7_last_tws`, `nb5_/nb7_right_tws`, `interp_nb5`, `last_minus_nb`,
+`right_minus_nb` (5×5 / 7×7 neighbour means and the local residual), and
+recency weights on the training target month (`HALFLIFE = 24`). Caches were
+rebuilt as `cache_late_v8_*` and `cache_replay_v8_b123_*`. All with
+half-life 24 unless stated; logs `logs/replay_v8_ablate.log`,
+`logs/v8_checks.log`, `logs/latecheck_v8_hl24.log`.
+
+| variant | late check | fold 123 | pseudo-test |
+|---|---|---|---|
+| v7 features, uniform (reference on the new caches) | 0.7121 / 0.907 | 0.6783 / 0.936 | 0.6820 / 0.823 |
+| v7 features + half-life 24 | 0.7033 / 0.896 | 0.6796 / 0.937 | 0.6844 / 0.825 |
+| v8 without lag anchors | 0.7019 / 0.894 | 0.6770 / 0.934 | 0.6828 / 0.824 |
+| v8 without wide neighbour means | 0.7007 / 0.893 | 0.6776 / 0.935 | 0.6820 / 0.823 |
+| **v8 (all)** | **0.6996 / 0.891** | **0.6748 / 0.931** | **0.6818 / 0.822** |
+
+v8 is −1.75% on the short blocks, −0.5% on fold 123 (the long block and
+extrapolation configs improve: (5,14) 0.527→0.519, (7,12) 0.687→0.672,
+(2,0) 0.731→0.712), and neutral on real labels. Nothing is worse anywhere.
+The late-check gain is again concentrated on junk-anchor months (159, 163,
+164: 0.68–0.74), so expect ~0.5–1% on the board, not 1.75%.
+
 ## Ranked next steps
 
 1. ~~Submit the calibration files~~ done; see above.
-2. **Select v8 on the late checks only** (`latecheck.py`, fold 123,
-   `pseudotest7.py`); treat the pooled replay as unmeasured.
-3. **Noise-oriented features**, since anchor noise is where the model earns
-   its keep in the late regime: wider neighbour means of the anchors (5×5,
-   7×7 — `diag6` shows 7×7 persistence beats 3×3 in 2015 and in the test
-   pairs), the second-left anchor (the known month before L: 173 for L=179),
-   and a local roughness measure of the anchor field as a noise indicator.
-   None of these are in v7.
-4. **v8 = v7 + recency half-life 24 months** (`--halflife 24` in the checks;
-   `model.py` needs the weight passed to `lgb.Dataset` in both the replay
-   folds and the refit, with the training row's target month recorded).
-   Measured +1.3% on the late check, neutral on the pseudo-test. Do it
-   together with the noise features above in one run, and submit it after the
-   calibration files. Excluding the 2015 junk months is measured harmless —
-   not a lever.
+2. **Submit `submission_v8.csv`** (the full `model.py` run of v8; `submission.csv`
+   is the same file) and record it. Expect ~0.73; anything above 0.7386 means
+   the late checks are still missing something about the public subset.
+3. **Keep selecting on the late checks only** (`latecheck.py`, fold 123,
+   `pseudotest7.py`); treat the pooled replay as unmeasured. Excluding the
+   2015 junk months is measured harmless — not a lever.
+4. **Where the remaining headroom is.** 78% of the model's board gain sits on
+   the long block + extrapolation half, and the pseudo-test says target-month
+   covariates are worth 12% there. Ideas not yet measured: a running sum of
+   `SPEI_01` from L to the target (the block's cumulative water balance,
+   rather than the mean over the gap), covariate residuals smoothed at 7×7,
+   and a per-cell slope fitted on 2012+ only (the weak-regime coupling).
 5. **Covariate availability at masked target months** (ERA5 precipitation /
    temperature from the Climate Data Store, permitted by the rules) — days of
    work, and the weak post-2011 coupling caps what it can return.
@@ -161,8 +184,9 @@ finish would put this choice in front of the Phase Two reviewers.
 ## Practical constraints
 
 - 7 GB RAM, 12 cores. `model.py` builds two replay folds (200k rows/config)
-  then refits on 400k rows/config (5.9M rows × 77 features, 220 rounds); peak
-  ~5 GB. `SMOKE=1 .venv/bin/python -u model.py` runs the whole pipeline on 5k
+  then refits on 400k rows/config (5.9M rows × 87 features, 223 rounds); peak
+  ~5 GB. Last run (v8): fold 68 0.5042, fold 123 0.6766 (interp 0.5736 /
+  0.7249). `SMOKE=1 .venv/bin/python -u model.py` runs the whole pipeline on 5k
   rows/config in ~3 min — use it after any edit.
 - `replay.py` caches feature frames per fold as `cache_replay_v7_b*_n*.parquet`;
   `latecheck.py` caches as `cache_late_c150_n100000_*.parquet` (gitignored,
