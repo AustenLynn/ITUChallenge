@@ -15,7 +15,8 @@ trustworthiness write-up that **only the top 10 may submit**.
 | v4 (recency + drift, strictly causal) | 0.767074 |
 | v5 (anchor bracketing) | 0.746183 |
 | v6 (leak fix + larger refit) | 0.736748 |
-| v7 (transferable features, replay selection) | **0.738568** |
+| v7 (transferable features, replay selection) | 0.738568 |
+| v8 (half-life 24, lag anchors, wide neighbour means) | **0.730218** |
 | linear interpolation (calibration) | 0.802237 |
 | hybrid: v7 on long block + extrapolation, interp elsewhere | 0.753301 |
 | top-10 cutoff | 0.655935 |
@@ -128,9 +129,8 @@ The late-check gain is again concentrated on junk-anchor months (159, 163,
 ## Ranked next steps
 
 1. ~~Submit the calibration files~~ done; see above.
-2. **Submit `submission_v8.csv`** (the full `model.py` run of v8; `submission.csv`
-   is the same file) and record it. Expect ~0.73; anything above 0.7386 means
-   the late checks are still missing something about the public subset.
+2. ~~Submit `submission_v8.csv`~~ done: **0.730218** (−1.1% on v7; the checks
+   had bracketed 0.5–1.75%). The selection protocol predicts the board.
 3. **Keep selecting on the late checks only** (`latecheck.py`, fold 123,
    `pseudotest7.py`); treat the pooled replay as unmeasured. Excluding the
    2015 junk months is measured harmless — not a lever.

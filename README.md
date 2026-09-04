@@ -143,7 +143,7 @@ per config (5k vs 100k: identical — the field is spatially smooth enough that
 | v5 (anchor bracketing)          | 0.6252 (24-mo, leaky) | 0.746183 | 0ca1f88 |
 | v6 (leak fix + 9.2M-row refit)  | 0.6298 (24-mo) / 0.5938 replay | 0.736748 | 3efff00 |
 | v7 (transferable features, replay selection) | 0.5401 replay / 0.7111 late check | **0.738568** | a82c06c |
-| v8 (half-life 24, lag anchors, 5×5/7×7 means) | 0.6996 late check / 0.6748 fold 123 / 0.6818 pseudo-test | *not yet submitted* (`submission_v8.csv`) | |
+| v8 (half-life 24, lag anchors, 5×5/7×7 means) | 0.6996 late check / 0.6748 fold 123 / 0.6818 pseudo-test | **0.730218** | cc91782 |
 | `submission_interp.csv` (linear interpolation) | 0.7848 late check / 0.7249 fold 123 | 0.802237 | 872df0d |
 | `submission_hybrid_long.csv` (v7 where dR ≥ 12 or dR = 0, interp elsewhere) | | 0.753301 | 872df0d |
 | `submission_seasonal.csv` (climatology-anchored interpolation) | worse than linear offline | *not submitted* | |
@@ -164,3 +164,6 @@ the test rows, 5 submissions per day. Top-10 cutoff 0.655935, leader 0.559588
   isolates them) and 0.022 on the short bracketed configs, i.e. a 3–4% gain
   on short spans — what the non-junk 2015 months of the late check showed.
   The late-regime checks are calibrated; the pooled replay is not.
+- **v8 (2026-09-04): 0.730218**, −1.1% on v7, inside the 0.5–1.75% the three
+  checks bracketed (late check −1.75%, fold 123 −0.5%, pseudo-test 0%).
+  Ratio to interpolation 0.910; MSE removed from interpolation 0.110.
