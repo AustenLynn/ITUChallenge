@@ -88,12 +88,15 @@ ratio: late check 0.6996 / 0.891, fold 123 0.6748 / 0.931, pseudo-test
 0.6818 / 0.822 — better or equal everywhere; the ablation table is in
 `HANDOFF.md`.
 
-Measured flat or worse on the replay (strong regime, so re-measure on the
-late checks before trusting): hyperparameters (leaves 15–255,
-`min_data_in_leaf` 200–10k, L2, feature fraction — all within 0.002),
-residual target, per-dL blend (−0.001), recency weighting, and training rows
-per config (5k vs 100k: identical — the field is spatially smooth enough that
-15.7k cells are a few hundred independent samples).
+**The model is signal-limited.** On the late-regime checks, four further
+feature groups (cumulative SPEI over the gap, a second right anchor, 7×7
+covariate residuals, slopes fitted on a recent window), seed averaging of the
+final refit, and spatial smoothing of the prediction all land inside ±0.001 —
+the checks' own run-to-run spread. `HANDOFF.md` has the tables. Earlier, on
+the pooled replay: hyperparameters (leaves 15–255, `min_data_in_leaf`
+200–10k, L2, feature fraction), residual target, per-dL blend, and training
+rows per config (5k vs 100k: identical — 15.7k cells are a few hundred
+independent samples) were flat as well.
 
 ## Problem shape
 

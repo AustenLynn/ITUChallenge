@@ -51,6 +51,8 @@ SEED = 0
 N_PER_CFG = 200_000          # per (dL, dR) config in a replay fold
 N_PER_CFG_FINAL = 400_000    # per config in the final refit
 REPLAY_FOLDS = [68, 123]     # base months; see replay.py for the layout
+# Seed averaging is measured flat (late check 1/3/5 seeds: 0.6996 / 0.6997 /
+# 0.6995), so the refit is a single model.
 if os.environ.get("SMOKE"):  # SMOKE=1 python model.py: tiny end-to-end check
     N_PER_CFG, N_PER_CFG_FINAL, REPLAY_FOLDS = 5_000, 5_000, [68]
 
@@ -74,7 +76,7 @@ RIGHT_FEATS = ["dR", "span", "w", "right_tws", "right_anom", "right_delta",
                "interp", "nb_right_tws", "interp_nb", "SPEI_06_t_dR",
                "SOIL_MOISTURE_t_dR",
                "nb5_right_tws", "nb7_right_tws", "interp_nb5", "right_minus_nb"]
-LAG_FEATS = [f"lag{k}_delta" for k in LAGS]
+LAG_FEATS = [f"lag{k}_delta" for k in LAGS]   # dense in training, mostly absent in test: see mask_lags
 NB_FEATS = ["nb5_last_tws", "nb7_last_tws", "last_minus_nb"]
 NEXT_FEATS = ([f"{c}_n" for c in DYN] + [f"{c}_nres" for c in DYN]
               + [f"{c}_nL" for c in DYN] + [f"{c}_nR" for c in DYN]

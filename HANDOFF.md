@@ -134,18 +134,53 @@ The late-check gain is again concentrated on junk-anchor months (159, 163,
 3. **Keep selecting on the late checks only** (`latecheck.py`, fold 123,
    `pseudotest7.py`); treat the pooled replay as unmeasured. Excluding the
    2015 junk months is measured harmless — not a lever.
-4. **Where the remaining headroom is.** 78% of the model's board gain sits on
-   the long block + extrapolation half, and the pseudo-test says target-month
-   covariates are worth 12% there. Ideas not yet measured: a running sum of
-   `SPEI_01` from L to the target (the block's cumulative water balance,
-   rather than the mean over the gap), covariate residuals smoothed at 7×7,
-   and a per-cell slope fitted on 2012+ only (the weak-regime coupling).
+4. ~~Where the remaining headroom is~~ **measured 2026-09-04/06: nothing left
+   in this direction.** Four candidate feature groups and two post-processing
+   levers all came out inside the noise (section below). The model is
+   signal-limited; see "Levers measured flat".
+
 5. **Covariate availability at masked target months** (ERA5 precipitation /
    temperature from the Climate Data Store, permitted by the rules) — days of
    work, and the weak post-2011 coupling caps what it can return.
 6. Seed/fold ensembling of the final refit. Cheap, variance-only.
 7. Phase Two artifacts — `emissions.csv` (CodeCarbon) and `valid_preds.parquet`
    (replay-fold predictions with lat/lon) exist.
+
+## Levers measured flat (2026-09-04 / 09-06)
+
+Everything here was measured on the late-regime checks with the v8 model as
+the reference, and every result sits inside the ±0.001 the checks reproduce
+run to run. **The model is signal-limited: nothing about the estimator is
+holding the score back.** Do not re-propose these without new evidence.
+
+**v9 candidate features** (logs `logs/v9_seq.log`, `logs/v9_a.log`; code
+removed after the measurement, the diff is in this commit's parent):
+
+| variant | late check | fold 123 | pseudo-test |
+|---|---|---|---|
+| v8 reference | 0.6987 | 0.6751 | 0.6826 |
+| all four groups | 0.6990 | 0.6760 | 0.6816 |
+| cumulative SPEI_01 over the gap | 0.6985 | 0.6756 | |
+| second right anchor (`rlag4_delta`) | 0.6993 | 0.6759 | |
+| 7×7-smoothed target-month residuals | 0.6983 | | |
+| per-cell slopes fitted on the last 36 months | 0.6983 | | |
+
+The sign flips between checks; the whole spread is 0.0010.
+
+**Seed averaging of the final refit** (`latecheck.py --fixed-rounds 380
+--seeds N`, log `logs/seeds.log`): 1 seed 0.6996, 3 seeds 0.6997, 5 seeds
+0.6995. Individual seeds span 0.7045–0.7056 on the unweighted eval, so there
+*is* seed variance — averaging just does not convert it into pooled score.
+
+**Spatially smoothing the prediction's departure from interpolation**
+(`interp + (1−α)·dev + α·smooth(dev)`, log `logs/smoothpred.log`): best
+0.6987 at α=0.5–0.75 with one 3×3 pass, against 0.6996 unsmoothed; two passes
+are worse (0.7009). The 0.0009 is the same size as the noise above. The model
+already reads 3×3/5×5/7×7 neighbour means, so its output is smooth already.
+
+Earlier, on the (unreliable) pooled replay: hyperparameters, residual target,
+per-dL blend, and training rows per config were all flat too. Five
+independent kinds of lever now measure flat.
 
 ## Problem structure — the non-obvious facts
 

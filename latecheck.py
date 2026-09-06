@@ -106,6 +106,9 @@ def main():
     ap.add_argument("--rounds", type=int, default=4000)
     ap.add_argument("--train-from", type=int, default=0, help="use only training rows with target month >= this")
     ap.add_argument("--halflife", type=float, default=0.0)
+    ap.add_argument("--seeds", type=int, default=1, help="average this many seeds (needs --fixed-rounds)")
+    ap.add_argument("--fixed-rounds", type=int, default=0,
+                    help="train exactly this many rounds with no early stopping; required for a clean --seeds comparison")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args()
     cache = f"cache_late_v8_c{a.cut}_n{a.n}"
@@ -123,10 +126,21 @@ def main():
     print(f"train {k.sum():,} rows (from month {a.train_from})  eval {len(VAX):,} rows  features {len(feats)}  drop={sorted(drop)}  halflife={a.halflife}")
     y, ip = VAX["_y"].to_numpy(), VAX["_interp"].to_numpy()
     rm = lambda p, s=slice(None): float(np.sqrt(np.mean((y[s] - p[s]) ** 2)))
-    mdl = lgb.train(M.PARAMS, lgb.Dataset(TRX.loc[k, feats], TRX["_y"].to_numpy()[k], weight=W), num_boost_round=a.rounds,
-                    valid_sets=[lgb.Dataset(VAX[feats], y)],
-                    callbacks=[lgb.early_stopping(200, verbose=False), lgb.log_evaluation(0)])
-    p = mdl.predict(VAX[feats])
+    ds = lgb.Dataset(TRX.loc[k, feats], TRX["_y"].to_numpy()[k], weight=W, free_raw_data=False)
+    if a.fixed_rounds:
+        # No early stopping: every seed sees the same budget, so an averaged
+        # prediction is not also picking its stopping point off the eval set.
+        preds, best = [], a.fixed_rounds
+        for s in range(a.seeds):
+            m = lgb.train(dict(M.PARAMS, seed=M.SEED + s), ds, num_boost_round=a.fixed_rounds)
+            preds.append(m.predict(VAX[feats]))
+            print(f"    seed {s}: {rm(preds[-1]):.4f}")
+        p = np.mean(preds, axis=0)
+    else:
+        mdl = lgb.train(M.PARAMS, ds, num_boost_round=a.rounds,
+                        valid_sets=[lgb.Dataset(VAX[feats], y)],
+                        callbacks=[lgb.early_stopping(200, verbose=False), lgb.log_evaluation(0)])
+        p, best = mdl.predict(VAX[feats]), mdl.best_iteration
     # test-weighted pooled score: weight each config by its share of test rows
     TEST_N = {"1,3": 31105, "1,4": 15683, "1,5": 15586, "2,3": 15582, "2,4": 15559, "3,2": 15547, "3,3": 15483,
               "4,2": 15409, "1,0": 15715, "2,0": 15624}
@@ -138,7 +152,7 @@ def main():
         if not s.any(): continue
         wm += TEST_N[c] * np.mean((y[s] - p[s]) ** 2); wi += TEST_N[c] * np.mean((y[s] - ip[s]) ** 2); wn += TEST_N[c]
         print(f"  {c:>5} {s.sum():7d} {rm(p, s):7.4f} {rm(ip, s):7.4f} {rm(p, s) / rm(ip, s):6.3f}")
-    print(f"  pooled (test-weighted): model {np.sqrt(wm / wn):.4f}  interp {np.sqrt(wi / wn):.4f}  ratio {np.sqrt(wm / wi):.3f}  best_iter {mdl.best_iteration}")
+    print(f"  pooled (test-weighted): model {np.sqrt(wm / wn):.4f}  interp {np.sqrt(wi / wn):.4f}  ratio {np.sqrt(wm / wi):.3f}  rounds {best}  seeds {a.seeds}")
     if not a.quiet:
         print("  by target month:")
         for t in sorted(set(VAX["_tgt"])):

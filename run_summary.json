@@ -3,16 +3,11 @@
   "replay_folds": {
     "68": {
       "interp": 0.5736275828085399,
-      "global": 0.5041657470354004,
-      "iters_global": 232
-    },
-    "123": {
-      "interp": 0.7248974862494096,
-      "global": 0.6765870617229969,
-      "iters_global": 214
+      "global": 0.5025580593347279,
+      "iters_global": 539
     }
   },
-  "replay_mean_global": 0.5903764043791986,
-  "rounds": 223,
-  "emissions_kg_co2eq": 0.001787866226610466
+  "replay_mean_global": 0.5025580593347279,
+  "rounds": 539,
+  "emissions_kg_co2eq": 0.0022120054428603556
 }
