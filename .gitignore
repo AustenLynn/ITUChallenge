@@ -20,3 +20,6 @@ logs/
 # Calibration submissions (regenerate with calib_subs.py)
 submission_*.csv
 cell_lag1.npy
+
+# Fitted AR(1) parameters (regenerate with krige.py)
+ar1_params.npz

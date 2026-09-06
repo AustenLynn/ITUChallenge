@@ -88,6 +88,16 @@ ratio: late check 0.6996 / 0.891, fold 123 0.6748 / 0.931, pseudo-test
 0.6818 / 0.822 — better or equal everywhere; the ablation table is in
 `HANDOFF.md`.
 
+**A per-cell AR(1)+noise model recovers two thirds of the skill.** Decomposing
+each cell into signal persistence and noise fraction from lags 1–3 of its own
+autocovariance (`krige.py`) and applying the resulting kriging weights to the
+two anchors scores **0.7280** on the late check with no training at all,
+against linear interpolation's 0.7848 and the trained model's 0.6996. The
+noise fraction is 0.00 in the Amazon and 0.29 in the Sahara, which is why a
+single global shrinkage cannot do the same job. It does not improve the model
+— fed in as a feature it costs 0.003 through collinearity with `interp` — but
+it is the interpretable core of what the model does.
+
 **The model is signal-limited.** On the late-regime checks, four further
 feature groups (cumulative SPEI over the gap, a second right anchor, 7×7
 covariate residuals, slopes fitted on a recent window), seed averaging of the
@@ -117,6 +127,7 @@ independent samples) were flat as well.
     pseudotest7.py           real-label check on the six observed test months, v7 pipeline
     pseudotest.py            same idea on the v6 feature API (kept for the record)
     calib_subs.py            writes the calibration submissions below
+    krige.py                 per-cell AR(1)+noise fit and its BLUP: the interpretable baseline
     model_v6_reference.py    previous version (board 0.736748); ablate*/diag1-4 import it
     model_causal_reference.py  strictly forward-looking version (board 0.767)
     diag5_regime.py, diag6_shrink.py, diag7_covariate_regime.py

@@ -183,6 +183,60 @@ def climatology(tr, cells):
     return (s / np.maximum(n, 1)).astype(np.float32)
 
 
+AR_LAGS = (1, 2, 3)
+
+
+def ar1_noise(G, upto, min_pairs=24):
+    """Per-cell (phi, vs, ve) for the model  y_t = s_t + e_t,  s an AR(1).
+
+    The observed autocovariance of that process is c_k = vs * phi^k for k >= 1
+    and c_0 = vs + ve, so two lags identify all three parameters:
+    phi = c2/c1, vs = c1/phi, ve = c0 - vs. Both phi and the noise fraction are
+    dynamical properties of a cell rather than levels, so they transfer the way
+    `beta_sm` does and `cell_mean` does not. Uses months < upto only."""
+    X = G[:, :upto].astype(np.float64)
+    ok = np.isfinite(X)
+    n0 = ok.sum(1)
+    mean = np.where(n0 > 0, np.where(ok, X, 0.0).sum(1) / np.maximum(n0, 1), 0.0)
+    Xc = np.where(ok, X - mean[:, None], 0.0)
+    c = {}
+    for k in (0,) + AR_LAGS:
+        a, b = (Xc, Xc) if k == 0 else (Xc[:, k:], Xc[:, :-k])
+        m = ok if k == 0 else (ok[:, k:] & ok[:, :-k])
+        n = m.sum(1)
+        c[k] = np.where(n >= min_pairs, (a * b).sum(1) / np.maximum(n, 1), np.nan)
+    c0, c1, c2, c3 = c[0], c[1], c[2], c[3]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        phi = np.where(np.isfinite(c3) & (c1 > 0),
+                       0.5 * (c2 / c1 + np.sqrt(np.clip(c3 / c1, 0, None))), c2 / c1)
+        phi = np.clip(phi, 0.05, 0.995)
+        vs = np.minimum(np.clip(c1 / phi, 0, None), c0)
+        ve = np.clip(c0 - vs, 0, None)
+    bad = ~np.isfinite(phi) | ~np.isfinite(vs) | (c1 <= 0)
+    return (np.where(bad, 0.9, phi).astype(np.float32),
+            np.where(bad, np.nan_to_num(c0, nan=1.0), vs).astype(np.float32),
+            np.where(bad, 0.0, ve).astype(np.float32))
+
+
+def blup_weights(phi, vs, ve, dL, dR):
+    """Kriging weights on (y_L, y_R) for the *signal* at the target month, and
+    the residual variance of that estimate. Linear interpolation is the special
+    case ve = 0, phi = 1; every departure from it is shrinkage."""
+    a = phi ** dL
+    v = np.maximum(vs + ve, 1e-9)
+    if not dR:
+        wL = vs * a / v
+        return wL, np.zeros_like(a), np.clip(vs - wL * vs * a, 0, None)
+    b = phi ** dR
+    off = vs * phi ** (dL + dR)
+    det = v * v - off * off
+    cL, cR = vs * a, vs * b
+    det = np.where(np.abs(det) < 1e-9, np.nan, det)
+    wL = (v * cL - off * cR) / det
+    wR = (v * cR - off * cL) / det
+    return wL, wR, np.clip(vs - (wL * cL + wR * cR), 0, None)
+
+
 def cell_betas(G, S, upto):
     """Per-cell slope of month-to-month TWS change on covariate change, using
     months < upto. A physical scale (how much storage moves per unit of soil

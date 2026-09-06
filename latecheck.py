@@ -109,6 +109,8 @@ def main():
     ap.add_argument("--seeds", type=int, default=1, help="average this many seeds (needs --fixed-rounds)")
     ap.add_argument("--fixed-rounds", type=int, default=0,
                     help="train exactly this many rounds with no early stopping; required for a clean --seeds comparison")
+    ap.add_argument("--resid", default="", choices=["", "interp"],
+                    help="learn the residual from this baseline instead of the raw target")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args()
     cache = f"cache_late_v8_c{a.cut}_n{a.n}"
@@ -126,21 +128,27 @@ def main():
     print(f"train {k.sum():,} rows (from month {a.train_from})  eval {len(VAX):,} rows  features {len(feats)}  drop={sorted(drop)}  halflife={a.halflife}")
     y, ip = VAX["_y"].to_numpy(), VAX["_interp"].to_numpy()
     rm = lambda p, s=slice(None): float(np.sqrt(np.mean((y[s] - p[s]) ** 2)))
-    ds = lgb.Dataset(TRX.loc[k, feats], TRX["_y"].to_numpy()[k], weight=W, free_raw_data=False)
+    # Residual learning: the baseline carries the information instead of a
+    # feature, so a strong but collinear estimate cannot duplicate `interp`.
+    base_tr = np.zeros(len(TRX), np.float64); base_va = np.zeros(len(VAX), np.float64)
+    if a.resid:
+        base_tr, base_va = TRX["_interp"].to_numpy(), VAX["_interp"].to_numpy()
+        print(f"  residual baseline: {a.resid}  (its own pooled RMSE below)")
+    ds = lgb.Dataset(TRX.loc[k, feats], (TRX["_y"].to_numpy() - base_tr)[k], weight=W, free_raw_data=False)
     if a.fixed_rounds:
         # No early stopping: every seed sees the same budget, so an averaged
         # prediction is not also picking its stopping point off the eval set.
         preds, best = [], a.fixed_rounds
         for s in range(a.seeds):
             m = lgb.train(dict(M.PARAMS, seed=M.SEED + s), ds, num_boost_round=a.fixed_rounds)
-            preds.append(m.predict(VAX[feats]))
+            preds.append(m.predict(VAX[feats]) + base_va)
             print(f"    seed {s}: {rm(preds[-1]):.4f}")
         p = np.mean(preds, axis=0)
     else:
         mdl = lgb.train(M.PARAMS, ds, num_boost_round=a.rounds,
-                        valid_sets=[lgb.Dataset(VAX[feats], y)],
+                        valid_sets=[lgb.Dataset(VAX[feats], y - base_va)],
                         callbacks=[lgb.early_stopping(200, verbose=False), lgb.log_evaluation(0)])
-        p, best = mdl.predict(VAX[feats]), mdl.best_iteration
+        p, best = mdl.predict(VAX[feats]) + base_va, mdl.best_iteration
     # test-weighted pooled score: weight each config by its share of test rows
     TEST_N = {"1,3": 31105, "1,4": 15683, "1,5": 15586, "2,3": 15582, "2,4": 15559, "3,2": 15547, "3,3": 15483,
               "4,2": 15409, "1,0": 15715, "2,0": 15624}

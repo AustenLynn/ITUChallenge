@@ -182,6 +182,54 @@ Earlier, on the (unreliable) pooled replay: hyperparameters, residual target,
 per-dL blend, and training rows per config were all flat too. Five
 independent kinds of lever now measure flat.
 
+## The kriging attempt (2026-09-06) — a good baseline that the model already beats
+
+The one structurally different idea tried after v8, and the only one that
+moved a number outside the noise. Kept in `krige.py`; the estimator functions
+`ar1_noise` and `blup_weights` live in `model.py`.
+
+**The reasoning.** Every estimator here carries an *observed* anchor forward,
+but the scored target is a noisy GRACE observation whose own noise is
+unpredictable, so the best achievable prediction is the *signal* at the target
+month. That predictor shrinks the anchors by each cell's noise fraction. Write
+`y_t = s_t + e_t` with `s` an AR(1): the observed autocovariance is
+`c_k = vs·phi^k` (k ≥ 1) and `c_0 = vs + ve`, so `phi = c2/c1`, `vs = c1/phi`,
+`ve = c0 − vs` — three parameters per cell from lags 1–3, all dynamical
+properties rather than levels. The kriging weights on the two anchors follow
+in closed form; linear interpolation is the special case `ve = 0, phi = 1`.
+
+**The fit is physically sensible.** Median `phi` 0.88; noise fraction 0.00 in
+the Amazon, 0.13 in Siberia, 0.29 in the Sahara/Arabia.
+
+**The striking result.** As a *pure baseline with no training at all*, the
+BLUP scores **0.7280** on the late check against linear interpolation's
+0.7848 — a 7.2% gain, where the whole trained model reaches 0.6996 (10.9%).
+It improves every configuration, the extrapolation ones `(1,0)` and `(2,0)` by
+10–13%. **Three parameters per cell recover two thirds of the model's skill
+over interpolation.** That belongs in the Phase Two write-up: it is the
+interpretable core of what the model is doing.
+
+**But it does not improve the model,** because the model already beats it
+everywhere (0.6996 < 0.7280). Late check, test-weighted:
+
+| variant | pooled |
+|---|---|
+| v8 reference | 0.6996 |
+| + all six kriging features | 0.7030 |
+| + estimates only (no `phi`/`nfrac`) | 0.7030 |
+| + `phi`/`nfrac` only | 0.6991 |
+| + `blup`/`blup_dev` only | 0.7035 |
+| learn the residual from the BLUP instead | 0.7063 |
+
+The per-cell parameters are harmless; the **BLUP estimate itself is what
+hurts**, and the reason is collinearity — it is a cell-weighted blend of
+`last_tws` and `right_tws`, the two features that already top the importance
+table, so it duplicates `interp` and splits the trees' capacity. Using it as a
+residual baseline instead of a feature is worse again.
+
+**Do not re-propose** kriging, shrinkage or per-cell noise features as model
+inputs. Do use the BLUP as the interpretable baseline in the write-up.
+
 ## Problem structure — the non-obvious facts
 
 - **Test has only 18 row months**, not 40: 164, 168–170, 173–176, 179–185,
